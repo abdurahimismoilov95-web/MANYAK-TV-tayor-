@@ -102,17 +102,128 @@ function adminOnly(req, res, next) {
   next();
 }
 
-// ─── SSE ────────────────────────────────────────────────────────────────────
+// ─── SSE (Server-Sent Events) ───────────────────────────────────────────────
+//
+// ESKI KODDAGI 3 TA XATO TUZATILDI:
+//
+// 1) AUTENTIFIKATSIYA YO'Q EDI. `/api/events?userId=<istalgan raqam>` —
+//    hech qanday tekshiruvsiz. Ya'ni istalgan odam o'zini boshqa
+//    foydalanuvchi deb ko'rsatib ulanishi mumkin edi.
+//    EventSource header yubora olmaydi, shuning uchun JWT `?token=` query
+//    parametrida qabul qilinadi va shu yerda tekshiriladi.
+//
+// 2) HAR BIR XABAR HAMMAGA YUBORILARDI. `for (const [, client] of sseClients)`
+//    — ya'ni chek ma'lumotlari (telefon raqam, summa, chek rasmi manzili)
+//    barcha ulangan klientlarga ketardi. Endi 3 xil yo'naltirish bor:
+//    `sendToUser` (faqat egasiga), `broadcastToAdmins` (faqat adminlarga),
+//    `broadcastToAll` (faqat maxfiy bo'lmagan xabarlar — masalan kontent
+//    ro'yxati yangilanishi).
+//
+// 3) MAP userId BO'YICHA EDI VA TIRIK ULANISHNI O'CHIRARDI. Bir foydalanuvchi
+//    2 tab ochsa, ikkinchisi birinchisini map'da bosib ketardi; keyin ESKI
+//    ulanish yopilganda uning `close` handleri TIRIK yozuvni o'chirardi va
+//    foydalanuvchi real-time xabarlarni olmay qo'yardi. Endi har userId uchun
+//    ulanishlar to'plami (Set) saqlanadi.
+//
+/** Map<userId, Set<{ res, isAdmin }>> */
 const sseClients = new Map();
+
+/** Bitta klientga xavfsiz yozish. Uzilgan socketga yozish xato tashlaydi. */
+function sseWrite(client, payload) {
+  try {
+    client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    return true;
+  } catch {
+    return false; // o'lik ulanish — chaqiruvchi uni ro'yxatdan olib tashlaydi
+  }
+}
+
+/** Berilgan shartga mos barcha klientlarga yuborish; o'liklarni tozalaydi. */
+function sseBroadcast(payload, filter = () => true) {
+  for (const [userId, clients] of sseClients) {
+    for (const client of clients) {
+      if (!filter(client, userId)) continue;
+      if (!sseWrite(client, payload)) clients.delete(client);
+    }
+    if (clients.size === 0) sseClients.delete(userId);
+  }
+}
+
+/** Faqat bitta foydalanuvchining barcha qurilma/tablariga. */
+function sendToUser(userId, payload) {
+  const clients = sseClients.get(String(userId));
+  if (!clients) return;
+  for (const client of clients) {
+    if (!sseWrite(client, payload)) clients.delete(client);
+  }
+  if (clients.size === 0) sseClients.delete(String(userId));
+}
+
+/** Faqat adminlarga (maxfiy ma'lumot — cheklar, telefon raqamlari). */
+function broadcastToAdmins(payload) {
+  sseBroadcast(payload, (client) => client.isAdmin);
+}
+
+/** Hammaga (faqat maxfiy BO'LMAGAN xabarlar uchun!). */
+function broadcastToAll(payload) {
+  sseBroadcast(payload);
+}
+
 app.get('/api/events', (req, res) => {
-  const userId = req.query.userId;
-  if (!userId) return res.status(400).json({ error: 'userId required' });
-  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
-  res.write(`data: ${JSON.stringify({ type: 'connected', userId })}\n\n`);
-  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
-  sseClients.set(String(userId), res);
-  req.on('close', () => { clearInterval(ping); sseClients.delete(String(userId)); });
+  // JWT query parametrida (EventSource header qo'ya olmaydi)
+  const token = req.query.token;
+  if (!token) return res.status(401).json({ ok: false, error: 'token kerak' });
+
+  let claims;
+  try {
+    claims = jwt.verify(String(token), JWT_SECRET);
+  } catch {
+    return res.status(401).json({ ok: false, error: 'Token yaroqsiz yoki muddati tugagan' });
+  }
+
+  const userId = String(claims.id);
+  const isAdmin = Boolean(claims.isAdmin);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // nginx bufferlashini o'chirish
+  });
+
+  const client = { res, isAdmin };
+  if (!sseClients.has(userId)) sseClients.set(userId, new Set());
+  sseClients.get(userId).add(client);
+
+  sseWrite(client, { type: 'connected', userId });
+
+  const ping = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      cleanup();
+    }
+  }, 25000);
+
+  function cleanup() {
+    clearInterval(ping);
+    const clients = sseClients.get(userId);
+    if (clients) {
+      clients.delete(client);
+      if (clients.size === 0) sseClients.delete(userId);
+    }
+  }
+
+  req.on('close', cleanup);
+  res.on('error', cleanup);
 });
+
+/** Health uchun: jami ochiq SSE ulanishlari soni. */
+function sseConnectionCount() {
+  let n = 0;
+  for (const clients of sseClients.values()) n += clients.size;
+  return n;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  AUTH ENDPOINTS
@@ -243,26 +354,22 @@ app.post('/api/contents', auth, adminOnly, (req, res) => {
   // ilova qayta ochilmaguncha bilmasdi. Endi SSE orqali barcha ulangan
   // mijozlarga xabar beramiz, ular esa kontent ro'yxatini serverdan
   // qayta so'raydi (qarang: src/App.tsx 'content_updated' handleri).
-  for (const [, client] of sseClients) {
-    client.write(`data: ${JSON.stringify({ type: 'content_updated', action: 'add', contentId: content.id })}\n\n`);
-  }
+  // Kontent ro'yxati maxfiy emas — hammaga yuborish mumkin.
+  broadcastToAll({ type: 'content_updated', action: 'add', contentId: content.id });
   res.json({ ok: true, content });
 });
 
 app.put('/api/contents/:id', auth, adminOnly, (req, res) => {
   const content = Contents.upsert({ ...req.body, id: req.params.id });
-  for (const [, client] of sseClients) {
-    client.write(`data: ${JSON.stringify({ type: 'content_updated', action: 'update', contentId: content.id })}\n\n`);
-  }
+  AuditLogs.add({ adminId: req.user.id, action: 'UPDATE_CONTENT', targetId: content.id, targetTitle: content.title });
+  broadcastToAll({ type: 'content_updated', action: 'update', contentId: content.id });
   res.json({ ok: true, content });
 });
 
 app.delete('/api/contents/:id', auth, adminOnly, (req, res) => {
   Contents.delete(req.params.id);
   AuditLogs.add({ adminId: req.user.id, action: 'DELETE_CONTENT', targetId: req.params.id });
-  for (const [, client] of sseClients) {
-    client.write(`data: ${JSON.stringify({ type: 'content_updated', action: 'delete', contentId: req.params.id })}\n\n`);
-  }
+  broadcastToAll({ type: 'content_updated', action: 'delete', contentId: req.params.id });
   res.json({ ok: true });
 });
 
@@ -333,12 +440,42 @@ app.get('/api/receipts', auth, adminOnly, (req, res) => {
   res.json({ ok: true, receipts });
 });
 
-app.post('/api/receipts', (req, res) => {
-  const receipt = Receipts.submit(req.body);
-  // Notify admin via SSE
-  for (const [, client] of sseClients) {
-    client.write(`data: ${JSON.stringify({ type: 'new_receipt', receipt })}\n\n`);
+// XAVFSIZLIK TUZATILDI: bu endpoint ilgari butunlay HIMOYALANMAGAN edi —
+// `auth` middleware yo'q, validatsiya yo'q. Ya'ni internetdagi istalgan odam
+// istalgan `userId` nomidan, istalgan `amount` bilan chek qo'shib, to'lov
+// statistikasini (Stats.totalRevenue) buzishi va barcha ulangan klientlarni
+// `new_receipt` xabari bilan spam qilishi mumkin edi.
+// Endi: autentifikatsiya majburiy, foydalanuvchi faqat O'Z nomidan chek
+// yuboradi (admin esa istalgan foydalanuvchi nomidan), va majburiy maydonlar
+// tekshiriladi (aks holda node:sqlite NOT NULL bind xatosi 500 qaytarardi).
+const RECEIPT_TYPES = ['vip_subscription', 'single_content'];
+
+app.post('/api/receipts', auth, (req, res) => {
+  const body = req.body || {};
+
+  // Foydalanuvchi boshqa odam nomidan chek yubora olmaydi
+  const userId = String(body.userId || req.user.id);
+  if (userId !== String(req.user.id) && !req.user.isAdmin) {
+    return res.status(403).json({ ok: false, error: "Ruxsat yo'q" });
   }
+
+  if (!RECEIPT_TYPES.includes(body.type)) {
+    return res.status(400).json({ ok: false, error: `type majburiy: ${RECEIPT_TYPES.join(' | ')}` });
+  }
+
+  const amount = Number(body.amount);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ ok: false, error: 'amount musbat son bo\'lishi kerak' });
+  }
+
+  const receipt = Receipts.submit({ ...body, userId, amount });
+
+  // Adminlarga SSE orqali xabar berish.
+  // `client.write` uzilgan socketga yozilsa xato tashlaydi — ilgari bu
+  // try/catch'siz edi va bitta o'lik klient butun so'rovni 500 qilardi
+  // (DB yozuvi allaqachon bo'lgani holda). Endi xatosiz broadcast.
+  broadcastToAdmins({ type: 'new_receipt', receipt });
+
   res.json({ ok: true, receipt });
 });
 
@@ -346,17 +483,33 @@ app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
   const { decision } = req.body; // 'approved' | 'rejected'
   if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ ok: false, error: 'decision: approved/rejected' });
 
-  const receipt = Receipts.review(req.params.id, req.user.id, decision);
-  if (!receipt) return res.status(404).json({ ok: false, error: 'Chek topilmadi' });
+  const result = Receipts.review(req.params.id, req.user.id, decision);
+  if (!result.receipt) return res.status(404).json({ ok: false, error: 'Chek topilmadi' });
 
-  AuditLogs.add({ adminId: req.user.id, action: decision === 'approved' ? 'APPROVE_RECEIPT' : 'REJECT_RECEIPT', targetId: req.params.id, details: `${receipt.amount} so'm` });
-
-  // SSE broadcast
-  for (const [, client] of sseClients) {
-    client.write(`data: ${JSON.stringify({ type: 'payment_decision', receiptId: req.params.id, decision, adminId: req.user.id })}\n\n`);
+  // Idempotentlik: chek allaqachon ko'rilgan bo'lsa qayta VIP berilmaydi.
+  // Ilgari bu tekshiruv yo'q edi va tugmani ikki marta bosish VIP muddatini
+  // ikki barobar uzaytirardi.
+  if (result.alreadyReviewed) {
+    return res.status(409).json({
+      ok: false,
+      error: `Bu chek allaqachon ko'rib chiqilgan (${result.receipt.status}).`,
+      receipt: result.receipt,
+    });
   }
 
-  res.json({ ok: true, receipt });
+  AuditLogs.add({ adminId: req.user.id, action: decision === 'approved' ? 'APPROVE_RECEIPT' : 'REJECT_RECEIPT', targetId: req.params.id, details: `${result.receipt.amount} so'm` });
+
+  // MAXFIYLIK: qaror faqat chek EGASIGA yuboriladi (ilgari hammaga ketardi).
+  sendToUser(result.receipt.user_id, {
+    type: 'payment_decision',
+    receiptId: req.params.id,
+    decision,
+    adminId: req.user.id,
+  });
+  // Adminlar navbatni yangilash uchun alohida xabar oladi.
+  broadcastToAdmins({ type: 'receipt_reviewed', receiptId: req.params.id, decision });
+
+  res.json({ ok: true, receipt: result.receipt });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -384,8 +537,14 @@ app.delete('/api/plans/:id', auth, adminOnly, (req, res) => {
 //  PROMO CODES API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.post('/api/promo/validate', (req, res) => {
-  const result = PromoCodes.validate(req.body.code || '');
+// ESKI KOD: bu endpoint (a) autentifikatsiyasiz edi va (b) `PromoCodes.validate`
+// chaqirilishi bilanoq promokod hisobini oshirardi. Ikkisi birgalikda shuni
+// bildiradi: istalgan odam tsiklda so'rov yuborib, promokodning butun
+// limitini bekorga tugatib qo'yishi mumkin edi.
+// Endi: auth majburiy, va `validate` faqat O'QIYDI — hisob esa haqiqiy xarid
+// paytida `PromoCodes.consume()` bilan oshiriladi.
+app.post('/api/promo/validate', auth, (req, res) => {
+  const result = PromoCodes.validate(req.body?.code || '');
   res.json({ ok: true, ...result });
 });
 
@@ -474,17 +633,79 @@ app.post('/api/checkin/:userId/claim', auth, ownerOrAdmin('userId'), (req, res) 
 });
 
 app.post('/api/tokens/unlock', auth, ownerOrAdmin('userId'), (req, res) => {
-  const { userId, contentId, episodeId, title, episodeTitle } = req.body;
-  const result = TokenUnlock.useToken(userId, contentId, episodeId, title, episodeTitle);
+  const { userId, contentId, episodeId, title, episodeTitle } = req.body || {};
+  if (!contentId) return res.status(400).json({ ok: false, error: 'contentId majburiy' });
+
+  const result = TokenUnlock.useToken(String(userId), String(contentId), episodeId, title, episodeTitle);
+
+  // Token yetmasa bu MUVAFFAQIYATSIZ so'rov — ilgari har doim `ok: true`
+  // qaytarilardi va frontend xatoni ajrata olmasdi.
+  if (!result.success) return res.status(400).json({ ok: false, ...result });
   res.json({ ok: true, ...result });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ENTITLEMENTS API — pul bilan bog'liq holatning YAGONA HAQIQAT MANBASI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// NEGA KERAK: ilgari frontend VIP holatini, sotib olingan kinolar ro'yxatini
+// va tokenlarni localStorage'dan o'qirdi, va u yerga o'zi ham yozardi
+// (`reviewReceipt`, `performInstantPurchase`, `useAccessTokenToUnlock`
+// funksiyalari entitlement'ni LOKAL berardi). Ya'ni brauzer konsolidan
+// `manyak_tv_current_user_v1` ni tahrirlab, hech nima to'lamasdan VIP bo'lish
+// mumkin edi.
+//
+// Endi klient bu endpointdan o'qiydi va localStorage faqat KESH bo'ladi:
+// keshni tahrirlash foydasiz, chunki keyingi sinxronlashda server qiymati
+// ustidan yozadi va tomosha huquqi shu qiymat bo'yicha hisoblanadi.
+app.get('/api/me/entitlements', auth, (req, res) => {
+  // Avval muddati o'tgan obunani yopamiz — shunda javob har doim aktual.
+  try {
+    Users.expireSubscriptions();
+  } catch (err) {
+    console.error('[Entitlements] expireSubscriptions:', err);
+  }
+
+  const user = Users.getById(String(req.user.id));
+  if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
+
+  res.json({
+    ok: true,
+    entitlements: {
+      userId: user.id,
+      isVip: Boolean(user.isVip),
+      vipExpiresAt: user.vipExpiresAt || null,
+      purchasedContentIds: user.purchasedContentIds || [],
+      unlockedEpisodeIds: user.unlockedEpisodeIds || [],
+      accessTokens: user.accessTokens || 0,
+      bonusBalance: user.bonusBalance || 0,
+      vipDiscountPercent: user.vipDiscountPercent || 0,
+      isPhoneVerified: Boolean(user.isPhoneVerified),
+      isBanned: Boolean(user.isBanned),
+      isAdmin: Boolean(req.user.isAdmin),
+      syncedAt: new Date().toISOString(),
+    },
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  STATS & AUDIT
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/stats', auth, adminOnly, (req, res) => res.json({ ok: true, stats: Stats.dashboard() }));
-app.get('/api/audit-logs', auth, adminOnly, (req, res) => res.json({ ok: true, logs: AuditLogs.getAll(Number(req.query.limit) || 100) }));
+app.get('/api/stats', auth, adminOnly, (req, res) => res.json({
+  ok: true,
+  stats: Stats.dashboard(),
+  sseConnections: sseConnectionCount(),
+}));
+
+// ESKI KOD: `Number(req.query.limit) || 100` — manfiy yoki juda katta qiymat
+// to'g'ridan-to'g'ri SQL `LIMIT` ga ketardi, `LIMIT -1` esa SQLite'da
+// "cheklovsiz" degani, ya'ni butun jurnalni bir so'rovda tortib olish mumkin.
+app.get('/api/audit-logs', auth, adminOnly, (req, res) => {
+  const requested = Number(req.query.limit);
+  const limit = Number.isFinite(requested) ? Math.min(Math.max(Math.trunc(requested), 1), 500) : 100;
+  res.json({ ok: true, logs: AuditLogs.getAll(limit) });
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  TELEGRAM PROXY & WEBHOOK
@@ -525,19 +746,50 @@ app.post('/api/telegram/send', auth, async (req, res) => {
 app.post('/webhook', async (req, res) => {
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (WEBHOOK_SECRET && secret !== WEBHOOK_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  // Telegram'ga darhol javob beramiz (retry qilmasligi uchun), keyin ishlaymiz.
   res.json({ ok: true });
 
-  const update = req.body;
+  // MUHIM: javob ALLAQACHON yuborilgan, shuning uchun bu yerdan keyingi
+  // har qanday xato Express'ga bora olmaydi — u `unhandledRejection` bo'lib
+  // Node 22'da butun serverni o'chirib qo'yardi. Endi hammasi try/catch ichida.
+  try {
+    await handleTelegramUpdate(req.body);
+  } catch (err) {
+    console.error('[Webhook] Update ishlanmadi:', err);
+  }
+});
+
+async function handleTelegramUpdate(update) {
   if (!update) return;
 
   const adminIds = [SUPER_ADMIN_ID, ...(process.env.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean)];
 
-  const processCmd = async (receiptId, decision, fromId, chatId, msgId, cbId) => {
-    const receipt = Receipts.review(receiptId, fromId, decision);
+  const processCmd = async (receiptId, decision, fromId, chatId, cbId) => {
+    const result = Receipts.review(receiptId, fromId, decision);
+
+    // Chek topilmasa — botda soxta/xato ID yuborilgan. Ilgari bunday holatda
+    // ham "tasdiqlandi" xabari chiqib, hamma klientga broadcast ketardi.
+    if (!result.receipt) {
+      if (chatId) await tgSend(chatId, `⚠️ Chek topilmadi: <code>${receiptId}</code>`);
+      if (cbId) await tgAnswer(cbId, 'Chek topilmadi');
+      return;
+    }
+
+    // Idempotentlik: Telegram inline tugmasi ikki marta bosilsa yoki update
+    // qayta yetkazilsa, VIP IKKINCHI marta berilmasligi kerak.
+    if (result.alreadyReviewed) {
+      const msg = `ℹ️ Bu chek allaqachon ko'rib chiqilgan: ${result.receipt.status}`;
+      if (chatId) await tgSend(chatId, msg);
+      if (cbId) await tgAnswer(cbId, 'Allaqachon ko\'rilgan');
+      return;
+    }
+
     const emoji = decision === 'approved' ? '✅' : '❌';
     const status = decision === 'approved' ? 'TASDIQLANDI' : 'RAD ETILDI';
 
-    for (const [, c] of sseClients) c.write(`data: ${JSON.stringify({ type: 'payment_decision', receiptId, decision, adminId: fromId })}\n\n`);
+    // MAXFIYLIK: faqat chek egasiga (ilgari barcha ulangan klientlarga ketardi)
+    sendToUser(result.receipt.user_id, { type: 'payment_decision', receiptId, decision, adminId: fromId });
+    broadcastToAdmins({ type: 'receipt_reviewed', receiptId, decision });
 
     if (chatId) await tgSend(chatId, `${emoji} <b>Chek ${status}!</b>\nID: <code>${receiptId}</code>`);
     if (cbId) await tgAnswer(cbId, `${emoji} ${status}!`);
@@ -548,8 +800,8 @@ app.post('/webhook', async (req, res) => {
     const data = String(update.callback_query.data || '');
     const chat = update.callback_query.message?.chat?.id;
     if (!adminIds.includes(from)) { await tgAnswer(update.callback_query.id, '❌ Ruxsat yo\'q'); return; }
-    if (data.startsWith('approve:')) await processCmd(data.replace('approve:', ''), 'approved', from, chat, null, update.callback_query.id);
-    else if (data.startsWith('reject:')) await processCmd(data.replace('reject:', ''), 'rejected', from, chat, null, update.callback_query.id);
+    if (data.startsWith('approve:')) await processCmd(data.replace('approve:', ''), 'approved', from, chat, update.callback_query.id);
+    else if (data.startsWith('reject:')) await processCmd(data.replace('reject:', ''), 'rejected', from, chat, update.callback_query.id);
   }
 
   if (update.message?.text) {
@@ -565,7 +817,7 @@ app.post('/webhook', async (req, res) => {
       await tgSend(chat, `📊 <b>Statistika</b>\nFoydalanuvchilar: ${s.totalUsers}\nVIP: ${s.vipUsers}\nKontentlar: ${s.totalContent}\nKutilayotgan cheklar: ${s.pendingReceipts}\nDaromad: ${s.totalRevenue} so'm`);
     }
   }
-});
+}
 
 async function tgSend(chatId, text) {
   if (!BOT_TOKEN || !chatId) return;
@@ -640,8 +892,21 @@ app.post('/api/setup-webhook', auth, adminOnly, async (req, res) => {
   if (!BOT_TOKEN) return res.status(503).json({ ok: false });
   const url = req.body.webhookUrl || `${process.env.APP_URL}/webhook`;
   if (!url?.startsWith('https://')) return res.status(400).json({ ok: false, error: 'HTTPS kerak' });
-  const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, secret_token: WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }) });
-  res.json(await r.json());
+
+  // ESKI KOD: `await fetch(...)` try/catch'siz edi. Express 4 async
+  // handler'lardagi rejection'ni USHLAMAYDI, shuning uchun Telegram API'ga
+  // ulanish uzilsa bu `unhandledRejection` bo'lib butun serverni o'chirardi.
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, secret_token: WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }),
+    });
+    res.json(await r.json());
+  } catch (err) {
+    console.error('[setup-webhook]', err);
+    res.status(502).json({ ok: false, error: 'Telegram API bilan bog\'lanib bo\'lmadi' });
+  }
 });
 
 // ─── Frontend to Backend Synchronization ────────────────────────────────
@@ -726,14 +991,46 @@ app.post('/api/sync-receipt', auth, (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
+    // ═══ 2 TA JIDDIY XATO TUZATILDI ═══
+    //
+    // 1) `undefined` BIND → CHEK JIMGINA YO'QOLARDI.
+    //    `userPhone` frontendda majburiy emas (types.ts: `userPhone?: string`),
+    //    `JSON.stringify` esa `undefined` maydonni butunlay tashlab yuboradi.
+    //    node:sqlite `undefined` ni bind qila olmaydi va
+    //    `ERR_INVALID_ARG_TYPE` tashlaydi → pastdagi catch 500 qaytaradi →
+    //    frontend esa uni faqat `console.error` bilan yutib yuboradi.
+    //    Natija: telefon raqami tasdiqlanmagan foydalanuvchining cheki
+    //    SQLite'ga HECH QACHON tushmasdi — ya'ni odam to'lagan, lekin admin
+    //    panelida ham, botda ham chek ko'rinmasdi.
+    //    Endi har bir maydon aniq `?? null` bilan normallashtiriladi.
+    //
+    // 2) `receipt.submittedAt` — BUNDAY MAYDON FRONTENDDA YO'Q.
+    //    Haqiqiy nom `createdAt` (types.ts:165, storage.ts submitPaymentReceipt).
+    //    Shuning uchun chekning haqiqiy yuborilgan vaqti tashlanib, har
+    //    sinxronlashda "hozir" bilan almashtirilardi (INSERT OR REPLACE).
+    const amount = Number(receipt.amount);
+
     stmt.run(
-      receipt.id, receipt.userId, receipt.userName, receipt.userPhone, receipt.type, 
-      receipt.planId || null, receipt.planName || null, receipt.contentId || null, receipt.contentTitle || null, 
-      receipt.amount, receipt.discountApplied || 0, receipt.promoCodeUsed || null, 
-      receipt.receiptImageUrl, receipt.notes || null, status,
-      receipt.submittedAt || new Date().toISOString(), reviewedAt, reviewedBy
+      String(receipt.id),
+      String(receipt.userId ?? req.user.id),
+      receipt.userName ?? '',
+      receipt.userPhone ?? null,
+      receipt.type ?? 'vip_subscription',
+      receipt.planId ?? null,
+      receipt.planName ?? null,
+      receipt.contentId ?? null,
+      receipt.contentTitle ?? null,
+      Number.isFinite(amount) ? amount : 0,
+      Number(receipt.discountApplied) || 0,
+      receipt.promoCodeUsed ?? null,
+      receipt.receiptImageUrl ?? null,
+      receipt.notes ?? null,
+      status,
+      receipt.createdAt ?? new Date().toISOString(),
+      reviewedAt,
+      reviewedBy
     );
-    
+
     res.json({ ok: true });
   } catch (err) {
     console.error('[Sync Receipt Error]', err);
@@ -741,9 +1038,18 @@ app.post('/api/sync-receipt', auth, (req, res) => {
   }
 });
 
-// ─── Bot Webhook & API ──────────────────────────────────────────────────────
+// ─── Health ─────────────────────────────────────────────────────────────────
+// ESKI KOD: bu endpoint autentifikatsiyasiz `Stats.dashboard()` ni qaytarardi,
+// ya'ni istalgan odam foydalanuvchilar soni, VIP soni va UMUMIY DAROMADni
+// (totalRevenue) ko'ra olardi. Endi health faqat "tirikmi?" degan savolga
+// javob beradi; biznes ko'rsatkichlari /api/stats da, admin himoyasi ostida.
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'MANYK TV SQLite Backend', version: '2.0.0', uptime: Math.floor(process.uptime()), sseClients: sseClients.size, stats: Stats.dashboard() });
+  res.json({
+    status: 'ok',
+    service: 'MANYK TV SQLite Backend',
+    version: '2.0.0',
+    uptime: Math.floor(process.uptime()),
+  });
 });
 
 // ─── Static (production) ──────────────────────────────────────────────────
@@ -751,8 +1057,105 @@ const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/') || req.path === '/webhook') return res.status(404).json({ error: 'Not found' });
-  res.sendFile(path.join(distPath, 'index.html'));
+
+  // `dist/` yo'q bo'lsa (build qilinmagan) `sendFile` xato tashlaydi va
+  // Express standart 500 HTML sahifasini qaytaradi — sababi tushunarsiz.
+  // Endi aniq xabar beramiz.
+  const indexPath = path.join(distPath, 'index.html');
+  if (!fs.existsSync(indexPath)) {
+    return res.status(503).type('text/plain').send(
+      "Frontend build topilmadi (dist/index.html). Avval `npm run build` bajaring."
+    );
+  }
+  res.sendFile(indexPath);
 });
+
+// ─── Xatolarni markazlashgan ushlash ────────────────────────────────────────
+// ESKI KOD: fayl bo'ylab HECH QANDAY error middleware yo'q edi. Har qanday
+// route ichidagi sinxron xato Express'ning standart handleriga tushib,
+// productionda ham stack trace'ni klientga qaytarishi mumkin edi.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('[Unhandled route error]', req.method, req.originalUrl, err);
+  if (res.headersSent) return;
+  res.status(500).json({ ok: false, error: 'Serverda kutilmagan xatolik' });
+});
+
+// ─── Obunalarni avtomatik tugatish ──────────────────────────────────────────
+// ESKI KOD: `Users.expireSubscriptions()` database.js da yozilgan, lekin
+// BUTUN LOYIHADA HECH QAYERDA CHAQIRILMAGAN edi. Natijada serverda VIP hech
+// qachon tugamasdi: muddati o'tgan foydalanuvchiga /api/sync-user va
+// /api/me/entitlements doim `isVip: true` qaytarib berardi.
+// Tugash faqat klient tomonida (localStorage'da) hisoblanardi — ya'ni
+// foydalanuvchi localStorage'ni tozalab, obunani "tiklab" olishi mumkin edi.
+function runExpirySweep() {
+  try {
+    const result = Users.expireSubscriptions();
+    if (result?.changes > 0) {
+      console.log(`[Expiry] ${result.changes} ta muddati o'tgan VIP obuna yopildi`);
+    }
+  } catch (err) {
+    console.error('[Expiry] Obunalarni tekshirishda xatolik:', err);
+  }
+}
+
+runExpirySweep();                                   // boot paytida bir marta
+const expiryTimer = setInterval(runExpirySweep, 60 * 60 * 1000); // keyin har soatda
+expiryTimer.unref?.();
+
+// ─── Kutilmagan xatolarni ushlash ───────────────────────────────────────────
+// ESKI KOD: bu handlerlar YO'Q edi. Node 22'da ushlanmagan promise rejection
+// standart holatda protsessni O'LDIRADI — ya'ni bitta tarmoq uzilishi butun
+// saytni ishdan chiqarardi. Endi xato jurnalga yozilib, server ishlashda
+// davom etadi.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  // Bu holat protsess holatini buzgan bo'lishi mumkin — jurnalga yozib,
+  // ulanishlarni chiroyli yopib, process manager qayta ishga tushirishi
+  // uchun chiqamiz.
+  shutdown('uncaughtException', 1);
+});
+
+// ─── Chiroyli to'xtash (graceful shutdown) ──────────────────────────────────
+// ESKI KOD: `db.close()` hech qachon chaqirilmasdi. SQLite WAL rejimida
+// (`PRAGMA journal_mode = WAL`) bu `-wal`/`-shm` fayllari checkpoint
+// qilinmasdan qolishiga olib keladi.
+let isShuttingDown = false;
+function shutdown(signal, exitCode = 0) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`\n[Shutdown] ${signal} qabul qilindi — yopilmoqda...`);
+
+  clearInterval(expiryTimer);
+
+  // Ochiq SSE ulanishlarini yopamiz
+  for (const clients of sseClients.values()) {
+    for (const client of clients) {
+      try { client.res.end(); } catch { /* allaqachon yopilgan */ }
+    }
+  }
+  sseClients.clear();
+
+  httpServer.close(() => {
+    try {
+      db.close();
+      console.log('[Shutdown] SQLite yopildi');
+    } catch (err) {
+      console.error('[Shutdown] DB yopishda xatolik:', err);
+    }
+    process.exit(exitCode);
+  });
+
+  // 10 sekunddan keyin majburiy chiqish (ulanishlar osilib qolsa)
+  setTimeout(() => process.exit(exitCode), 10000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, () => {
