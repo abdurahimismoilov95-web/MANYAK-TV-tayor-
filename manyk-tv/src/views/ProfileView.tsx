@@ -28,7 +28,7 @@ import {
   ImagePlus,
 } from 'lucide-react';
 import { UserProfile, SystemSettings, ContentItem } from '../types';
-import { switchUserProfile, validatePromoCode, saveStoredCurrentUser, clearWatchHistory } from '../services/storage';
+import { validatePromoCode, clearWatchHistory, saveStoredCurrentUser, uploadFileToServer } from '../services/storage';
 
 interface ProfileViewProps {
   user: UserProfile;
@@ -62,7 +62,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [promoResult, setPromoResult] = useState<string | null>(null);
 
   // Switch demo account tester state
-  const [showTesterSwitcher, setShowTesterSwitcher] = useState(false);
   const [customIdInput, setCustomIdInput] = useState('');
 
   // Toast notification state: user can dismiss toast, but it re-evaluates when user state changes
@@ -88,19 +87,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setIsToastDismissed(false);
   }, [user.id, user.vipExpiresAt]);
 
-  // Helper to simulate 2-day remaining expiry for instant testing
-  const handleSimulateExpiringSoon = () => {
-    const twoDaysLater = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
-    const updated: UserProfile = {
-      ...user,
-      isVip: true,
-      vipExpiresAt: twoDaysLater,
-    };
-    saveStoredCurrentUser(updated);
-    setIsToastDismissed(false);
-    onRefreshUser();
-  };
-
   // Get purchased contents
   const purchasedItems = contents.filter((c) =>
     user.purchasedContentIds?.includes(c.id)
@@ -117,12 +103,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }
   };
 
-  const handleSwitchAccount = (telegramId: string, name: string) => {
-    switchUserProfile(telegramId, name);
-    onRefreshUser();
-  };
-
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isAvatarUploading, setIsAvatarUploading] = useState(false);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
 
   const handleClearCache = () => {
     if (window.confirm("Keshni va ko'rishlar tarixini tozalashni xohlaysizmi? Bu qurilmangizdagi joyni bo'shatadi.")) {
@@ -147,18 +130,39 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }
   };
 
-  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64String = reader.result as string;
-        const updatedUser = { ...user, avatarUrl: base64String };
-        saveStoredCurrentUser(updatedUser);
-        window.dispatchEvent(new CustomEvent('manyak_storage_update'));
-        onRefreshUser();
-      };
-      reader.readAsDataURL(file);
+  // ═══ AVATAR: base64 -> serverga yuklash ═══
+  // ESKI KOD rasmni `readAsDataURL` bilan base64 qilib localStorage'ga
+  // yozardi — chek rasmi bilan bir xil muammo: katta rasm ~5 MB kvotani
+  // yorib, avatar (va ba'zan butun profil yozuvi) jimgina saqlanmasdi.
+  // Bundan tashqari avatar faqat shu qurilmada ko'rinardi.
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    setAvatarError(null);
+
+    if (file.size > 8 * 1024 * 1024) {
+      setAvatarError('Rasm juda katta (maksimal 8 MB).');
+      input.value = '';
+      return;
+    }
+
+    setIsAvatarUploading(true);
+    try {
+      const url = await uploadFileToServer(file);
+      // Avatar — zararsiz profil maydoni, shuning uchun uni klient
+      // yangilashi mumkin; server `/api/sync-user` orqali qabul qiladi
+      // (u SERVER_OWNED_USER_FIELDS ro'yxatida emas).
+      saveStoredCurrentUser({ ...user, avatarUrl: url });
+      onRefreshUser();
+    } catch (err) {
+      setAvatarError(
+        err instanceof Error ? `Rasmni yuklab bo'lmadi: ${err.message}` : "Rasmni yuklab bo'lmadi."
+      );
+    } finally {
+      setIsAvatarUploading(false);
+      input.value = '';
     }
   };
 
@@ -228,10 +232,16 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               ) : (
                 <span>{user.firstName ? user.firstName.charAt(0).toUpperCase() : 'U'}</span>
               )}
-              {/* Overlay on hover */}
-              <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-opacity">
-                <ImagePlus className="w-4 h-4 text-white" />
-              </div>
+              {/* Overlay: yuklanmoqda yoki hover */}
+              {isAvatarUploading ? (
+                <div className="absolute inset-0 bg-black/75 flex items-center justify-center">
+                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : (
+                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-opacity">
+                  <ImagePlus className="w-4 h-4 text-white" />
+                </div>
+              )}
             </div>
             {user.isVip && (
               <div className="absolute -bottom-1 -right-1 bg-amber-500 rounded-full p-1 ring-2 ring-[#121216] shadow">
@@ -239,6 +249,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </div>
             )}
           </div>
+
+          {/* Avatar yuklash xatosi — ilgari xatolar jimgina yo'qolardi */}
+          {avatarError && (
+            <div className="absolute left-4 right-4 -bottom-2 translate-y-full z-10 p-2 rounded-lg bg-red-950/90 border border-red-800 text-[11px] text-red-300">
+              {avatarError}
+            </div>
+          )}
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
@@ -739,18 +756,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             </div>
           </div>
 
-          {/* Admin Helper Controls: Tester Switcher & Telegram Auth */}
+          {/* Telegram profilini tasdiqlash tugmasi */}
           <div className="flex flex-col items-center gap-2">
             <div className="flex items-center justify-center gap-3 flex-wrap">
-              <button
-                type="button"
-                onClick={() => setShowTesterSwitcher(!showTesterSwitcher)}
-                className="text-xs text-zinc-500 hover:text-zinc-300 font-medium flex items-center gap-1 transition"
-              >
-                <UserCheck className="w-3.5 h-3.5" />
-                <span>Hisobni almashtirish / Test rejim</span>
-              </button>
-
               {onOpenTelegramAuth && (
                 <button
                   type="button"
@@ -763,55 +771,26 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               )}
             </div>
 
-            {showTesterSwitcher && (
-              <div className="w-full mt-2 p-4 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-3">
-                <div className="text-xs font-bold text-zinc-300">
-                  Sinov uchun profilni tanlang:
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleSwitchAccount('891846690', 'Admin (891846690)')}
-                    className={`p-2.5 rounded-xl border text-xs font-bold transition text-left ${
-                      user.id === '891846690'
-                        ? 'bg-red-950/60 border-red-500 text-red-300'
-                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    <div>👑 Asosiy Admin</div>
-                    <div className="text-[10px] font-mono">ID: 891846690</div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleSwitchAccount('77441199', 'Foydalanuvchi Bekzod')}
-                    className={`p-2.5 rounded-xl border text-xs font-bold transition text-left ${
-                      user.id !== '891846690'
-                        ? 'bg-zinc-800 border-zinc-600 text-white'
-                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    <div>👤 Oddiy Foydalanuvchi</div>
-                    <div className="text-[10px] font-mono">ID: 77441199</div>
-                  </button>
-                </div>
-
-                {/* Instant 3-day notification tester */}
-                <div className="pt-2 border-t border-zinc-800/80">
-                  <div className="text-[11px] font-bold text-zinc-400 mb-1.5">
-                    Obuna bildirishnomasi (Toast) sinovi:
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleSimulateExpiringSoon}
-                    className="w-full py-2 px-3 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-bold transition flex items-center justify-center gap-1.5"
-                  >
-                    <BellRing className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Obuna tugashiga 2 kun qolgan holatni sinash (Toastni ko'rish)</span>
-                  </button>
-                </div>
-              </div>
-            )}
+            {/* ═══ OLIB TASHLANGAN: "Hisobni almashtirish / Test rejim" paneli ═══
+              *
+              * Bu blokda 3 ta tugma bor edi va HAMMASI oddiy foydalanuvchiga
+              * ko'rinardi:
+              *   - handleSwitchAccount('891846690', 'Admin (891846690)')
+              *     -> switchUserProfile() -> localStorage'ga Bosh Admin
+              *        profilini yozardi -> isUserAdmin() true -> ADMIN PANELI
+              *        OCHILARDI. Bu ilovadagi eng katta xavfsizlik teshigi edi.
+              *   - handleSwitchAccount('77441199', ...) — boshqa odam profiliga
+              *     kirish.
+              *   - handleSimulateExpiringSoon() -> `isVip: true` bilan bepul
+              *     2 kunlik VIP.
+              *
+              * Bu tugmalar ishlab chiqish (dev) uchun yozilgan, lekin
+              * productionda ham qolib ketgan. Ular butunlay olib tashlandi.
+              *
+              * Adminlik endi FAQAT server tasdiqlagan JWT `isAdmin` claim'i
+              * bilan beriladi (Telegram initData HMAC tekshiruvi orqali) —
+              * qarang: services/storage.ts `isUserAdmin()`.
+              */}
           </div>
         </div>
       )}

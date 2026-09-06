@@ -300,6 +300,10 @@ export async function syncEntitlementsFromServer(): Promise<Entitlements | null>
  * klient tomonidagi zararsiz maydonlar saqlanadi.
  */
 function applyEntitlementsToCache(ent: Entitlements): Entitlements {
+  // Adminlik holatini serverning JWT claim'idan belgilaymiz — bu
+  // localStorage'dagi hech qanday qiymatga bog'liq emas.
+  setServerVerifiedAdmin(ent.userId, ent.isAdmin);
+
   const stored = getItem<UserProfile | null>(KEYS.CURRENT_USER, null);
   if (!stored || stored.id !== ent.userId) return ent;
 
@@ -445,7 +449,13 @@ export function getStoredSettings(): SystemSettings {
     ...loaded,
     botUsername: loaded.botUsername || loaded.telegramBotUsername || 'Manyaktvbot',
     telegramBotUsername: loaded.telegramBotUsername || loaded.botUsername || 'Manyaktvbot',
-    secondaryAdminPassword: loaded.secondaryAdminPassword || INITIAL_SETTINGS.secondaryAdminPassword || '8918',
+    // ESKI KOD: `... || '8918'` — sozlamada PIN o'rnatilmagan bo'lsa,
+    // hamma o'rnatma uchun bir xil, kod ichida ochiq yozilgan PIN ishlardi
+    // (AdminPanel esa uni xato xabarida to'g'ridan-to'g'ri aytib berardi).
+    // Endi standart qiymat YO'Q: PIN o'rnatilmagan bo'lsa, xavfli amallar
+    // uchun tasdiqlash o'tmaydi (fail-closed) va admin avval o'zining
+    // PIN'ini o'rnatishi kerak.
+    secondaryAdminPassword: loaded.secondaryAdminPassword || INITIAL_SETTINGS.secondaryAdminPassword || '',
     enabledPaymentMethods: {
       ...INITIAL_SETTINGS.enabledPaymentMethods!,
       ...(loaded.enabledPaymentMethods || {}),
@@ -881,10 +891,15 @@ export function getStoredCurrentUser(): UserProfile {
             username: tgUser.username || '',
             phone: undefined,
             isPhoneVerified: false,
-            isVip: isAutoAdmin,
-            vipExpiresAt: isAutoAdmin
-              ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
-              : undefined,
+            // ESKI KOD: `isVip: isAutoAdmin` va 365 kunlik `vipExpiresAt` —
+            // ya'ni klient yangi profil yaratayotganda O'ZIGA VIP berardi.
+            // Entitlement endi FAQAT serverdan keladi
+            // (`syncEntitlementsFromServer`), shuning uchun bu yerda
+            // hech qanday huquq berilmaydi. Agar bu foydalanuvchi haqiqatan
+            // admin bo'lsa, server `/api/auth/verify` da uni VIP qilib
+            // yaratadi va keyingi sinxronlashda kesh ham yangilanadi.
+            isVip: false,
+            vipExpiresAt: undefined,
             purchasedContentIds: [],
             favorites: [],
             deviceToken: currentHwid,
@@ -1023,10 +1038,13 @@ export function switchUserProfile(telegramId: string, firstName: string, usernam
       id: telegramId,
       firstName: firstName || `Foydalanuvchi #${telegramId}`,
       username: username || '',
-      phone: isAdminId ? '+998901234567' : undefined,
-      isPhoneVerified: isAdminId ? true : false,
-      isVip: isAdminId ? true : false,
-      vipExpiresAt: isAdminId ? new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString() : undefined,
+      // ESKI KOD adminlar uchun bu yerda soxta telefon (`+998901234567`),
+      // `isPhoneVerified: true`, `isVip: true` va 60 kunlik muddat berardi.
+      // Bularning barchasi entitlement — endi faqat serverdan keladi.
+      phone: undefined,
+      isPhoneVerified: false,
+      isVip: false,
+      vipExpiresAt: undefined,
       purchasedContentIds: [],
       favorites: ['m-parijdagi-akula'],
       deviceToken: currentHwid,
@@ -1040,48 +1058,38 @@ export function switchUserProfile(telegramId: string, firstName: string, usernam
 }
 
 /**
- * Verifies user via Telegram Profile (syncs with @Manyaktvbot)
- * If the profile belongs to an administrator, automatically grants site and admin access!
+ * Foydalanuvchini Telegram profili orqali tasdiqlaydi.
+ *
+ * ═══ OLIB TASHLANGAN XAVFSIZLIK TESHIGI ═══
+ *
+ * ESKI KOD adminlikni foydalanuvchi KIRITGAN MATNNI tenglashtirish bilan
+ * berardi:
+ *
+ *   const isPrimaryAdmin = cleanInput === '891846690'
+ *                       || cleanInput.toLowerCase() === 'manyak_admin';
+ *   if (isAdmin) {
+ *     localStorage.setItem('manyak_allow_pc_admin', 'true');
+ *     const adminUser = switchUserProfile(adminId, 'Bosh Admin (891846690)', ...);
+ *     adminUser.isVip = true;                 // <- bepul VIP
+ *     saveStoredCurrentUser(adminUser);       // <- admin profili localStorage'ga
+ *   }
+ *
+ * Ya'ni oynaga "891846690" deb yozish yetarli edi: hech qanday Telegram
+ * tasdiqlashi (initData HMAC) yo'q, hech qanday parol yo'q. Foydalanuvchi
+ * bir zumda Bosh Admin + VIP bo'lardi. `manyak_allow_pc_admin` esa
+ * brauzerdagi oddiy `true` satri — u ham avtorizatsiya sifatida
+ * ishlatilardi.
+ *
+ * ENDI: bu funksiya HECH KIMGA adminlik yoki VIP BERMAYDI. Adminlik faqat
+ * serverdan (Telegram initData HMAC tekshiruvidan o'tgan JWT `isAdmin`
+ * claim'i) keladi — qarang `syncEntitlementsFromServer()` va `isUserAdmin()`.
+ * Bu funksiya faqat profilni almashtiradi va telefonni belgilaydi.
  */
 export function verifyTelegramProfileAndAuthorize(
   telegramIdOrPhone: string,
   extra?: { firstName?: string; username?: string; phone?: string }
 ): { success: boolean; isAdmin: boolean; message: string; user: UserProfile } {
   const cleanInput = telegramIdOrPhone.trim().replace(/^@/, '');
-  const settings = getStoredSettings();
-  const adminIds = (settings.adminTelegramIds || []).map((id) => String(id).trim());
-
-  // Check if this Telegram ID belongs to an administrator
-  const isPrimaryAdmin = cleanInput === '891846690' || cleanInput.toLowerCase() === 'manyak_admin';
-  const isConfiguredAdmin = adminIds.includes(cleanInput);
-  const isAdmin = isPrimaryAdmin || isConfiguredAdmin;
-
-  if (isAdmin) {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('manyak_allow_pc_admin', 'true');
-    }
-    const adminId = cleanInput.match(/^\d+$/) ? cleanInput : '891846690';
-    const adminUser = switchUserProfile(
-      adminId,
-      extra?.firstName || 'Bosh Admin (891846690)',
-      extra?.username || 'manyak_admin'
-    );
-    adminUser.isPhoneVerified = true;
-    adminUser.isVip = true;
-    if (extra?.phone) adminUser.phone = extra.phone;
-    saveStoredCurrentUser(adminUser);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('manyak_storage_update'));
-    }
-
-    return {
-      success: true,
-      isAdmin: true,
-      message: "Adminlik Telegram profilingiz orqali tasdiqlandi! Saytga va boshqaruv paneliga to'liq kirish huquqi berildi.",
-      user: adminUser,
-    };
-  }
 
   // Regular user verification
   const current = getStoredCurrentUser();
@@ -1105,8 +1113,11 @@ export function verifyTelegramProfileAndAuthorize(
 
   return {
     success: true,
+    // Adminlik BU YERDA aniqlanmaydi — server tasdiqlaydi. Agar shu
+    // foydalanuvchi haqiqatan admin bo'lsa, `syncEntitlementsFromServer()`
+    // buni aniqlaydi va admin paneli avtomatik ochiladi.
     isAdmin: false,
-    message: `Telegram profilingiz muvaffaqiyatli tasdiqlandi! @${settings.botUsername || 'Manyaktvbot'} orqali kinolarni to'liq tomosha qilishingiz mumkin.`,
+    message: `Telegram profilingiz muvaffaqiyatli tasdiqlandi! @${getStoredSettings().botUsername || 'Manyaktvbot'} orqali kinolarni to'liq tomosha qilishingiz mumkin.`,
     user,
   };
 }
@@ -1164,16 +1175,67 @@ export const DEFAULT_SUB_ADMIN_PERMISSIONS: AdminPermissions = {
   canManageAdmins: false,
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMINLIK — SERVER TOMONIDAN TASDIQLANADI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ESKI KOD adminlikni FAQAT localStorage'dagi sozlamalardan aniqlardi:
+//     if (cleanId === SUPER_ADMIN_ID) return FULL_ADMIN_PERMISSIONS;
+//     const appointed = settings.appointedAdmins.find(...)
+//     const adminIds = settings.adminTelegramIds ...
+//
+// Ikkisi ham foydalanuvchi tahrirlay oladigan ma'lumot edi. Buni
+// `switchUserProfile('891846690')` (ProfileView'dagi test tugmasi) yoki
+// oddiy konsol buyrug'i bilan birlashtirsangiz — istalgan odam admin
+// panelini ochib, localStorage'dagi kontent/foydalanuvchi/sozlamalarni
+// o'zgartira olardi.
+//
+// ENDI: adminlik faqat SERVER tasdiqlagan JWT da `isAdmin: true` bo'lsa
+// beriladi (server buni Telegram initData HMAC tekshiruvidan keyin
+// `Admins.isAdmin()` orqali aniqlaydi — bu qiymatni soxtalashtirib
+// bo'lmaydi). localStorage'dagi sozlamalar endi faqat GRANULAR huquqlarni
+// (qaysi bo'lim ko'rinadi) belgilash uchun ishlatiladi — ya'ni allaqachon
+// server tasdiqlagan adminning huquqlarini TORAYTIRISHI mumkin, lekin
+// hech kimga adminlik BERA OLMAYDI.
+
+/** Serverdan tasdiqlangan admin foydalanuvchi ID si (JWT `isAdmin` claim). */
+let serverVerifiedAdminId: string | null = null;
+
+/**
+ * `syncEntitlementsFromServer()` dan chaqiriladi — server JWT dagi
+ * `isAdmin` claim asosida adminlikni belgilaydi.
+ */
+function setServerVerifiedAdmin(userId: string, isAdmin: boolean): void {
+  serverVerifiedAdminId = isAdmin ? String(userId).trim() : null;
+}
+
+/** Server hali javob bermaganini tekshirish uchun (UI "yuklanmoqda" holati). */
+export function isAdminStatusVerified(): boolean {
+  return serverVerifiedAdminId !== null;
+}
+
 export function isUserSuperAdmin(userId?: string): boolean {
   if (!userId) return false;
+  // Super admin ham avval SERVER tomonidan admin deb tasdiqlanishi kerak
+  if (!isUserAdmin(userId)) return false;
   return String(userId).trim() === SUPER_ADMIN_ID;
+}
+
+export function isUserAdmin(userId?: string): boolean {
+  if (!userId) return false;
+  if (!serverVerifiedAdminId) return false;
+  return serverVerifiedAdminId === String(userId).trim();
 }
 
 export function getUserAdminPermissions(userId?: string): AdminPermissions | null {
   if (!userId) return null;
   const cleanId = String(userId).trim();
-  
-  // Super Admin has 100% full rights with ZERO restrictions!
+
+  // 1-QADAM (majburiy): server bu foydalanuvchini admin deb tasdiqladimi?
+  if (!isUserAdmin(cleanId)) return null;
+
+  // 2-QADAM: granular huquqlar. Bu yerda faqat huquqlarni TORAYTIRISH
+  // mumkin — adminlikning o'zi allaqachon yuqorida tasdiqlangan.
   if (cleanId === SUPER_ADMIN_ID) {
     return { ...FULL_ADMIN_PERMISSIONS };
   }
@@ -1184,18 +1246,9 @@ export function getUserAdminPermissions(userId?: string): AdminPermissions | nul
     return appointed.permissions;
   }
 
-  // Fallback for legacy adminTelegramIds
-  const adminIds = (settings.adminTelegramIds || []).map((id) => String(id).trim());
-  if (adminIds.includes(cleanId)) {
-    return { ...DEFAULT_SUB_ADMIN_PERMISSIONS };
-  }
-
-  return null;
-}
-
-export function isUserAdmin(userId?: string): boolean {
-  if (!userId) return false;
-  return getUserAdminPermissions(userId) !== null;
+  // Server admin deb tasdiqladi, lekin lokal sozlamalarda granular yozuv
+  // yo'q — ehtiyotkorlik uchun eng kam huquqlar beriladi.
+  return { ...DEFAULT_SUB_ADMIN_PERMISSIONS };
 }
 
 export function getAppointedAdmins(): AppointedAdmin[] {

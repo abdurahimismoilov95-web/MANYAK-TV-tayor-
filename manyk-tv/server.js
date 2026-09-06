@@ -395,33 +395,112 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // foydalanuvchi qurilmasida ochiladi.
 app.use('/uploads', express.static(UPLOADS_DIR));
 
+// Adminlar uchun: poster rasm va video fayllar
 const ALLOWED_UPLOAD_EXT = new Set([
   'jpg', 'jpeg', 'png', 'webp', 'gif',
   'mp4', 'webm', 'mov', 'm3u8', 'ts',
 ]);
 
+// Oddiy foydalanuvchilar uchun: FAQAT rasm (to'lov cheki skrinshoti)
+const ALLOWED_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'webp']);
+
+// Oddiy foydalanuvchi yuklashi mumkin bo'lgan maksimal hajm (chek skrinshoti)
+const USER_UPLOAD_LIMIT = 8 * 1024 * 1024;   // 8 MB
+const ADMIN_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024; // 2 GB (video)
+
+/**
+ * Fayl "sehrli baytlari" (magic bytes) orqali HAQIQIY rasm ekanini
+ * tekshiradi. `Content-Type` header'ini klient to'liq boshqaradi, ya'ni
+ * unga ishonib bo'lmaydi — istalgan binar faylni "image/jpeg" deb yuborish
+ * mumkin.
+ */
+function detectImageExt(buf) {
+  if (!buf || buf.length < 12) return null;
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  // WEBP: "RIFF"...."WEBP"
+  if (buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') return 'webp';
+  // GIF: "GIF8"
+  if (buf.subarray(0, 4).toString('ascii') === 'GIF8') return 'gif';
+  return null;
+}
+
+// ═══ TUZATILDI: ODDIY FOYDALANUVCHI CHEK YUKLAY OLMASDI ═══
+//
+// Bu endpoint `adminOnly` bilan himoyalangan edi. Chek rasmi esa aynan
+// ODDIY FOYDALANUVCHI tomonidan yuklanadi — ya'ni to'lov oqimi bu yerda
+// 403 bilan to'xtardi. (Ilgari bu sezilmagan, chunki frontend chekni
+// umuman yuklamasdan base64 qilib localStorage'ga yozardi.)
+//
+// Endi: autentifikatsiya qilingan HAR QANDAY foydalanuvchi yuklashi mumkin,
+// lekin oddiy foydalanuvchi uchun qattiq cheklovlar bor:
+//   - faqat rasm (magic bytes bilan tekshiriladi, Content-Type'ga ishonmaymiz)
+//   - maksimal 8 MB (adminlar uchun 2 GB — video uchun)
 app.post(
   '/api/upload',
   auth,
-  adminOnly,
-  express.raw({ type: '*/*', limit: '2gb' }),
+  express.raw({ type: '*/*', limit: ADMIN_UPLOAD_LIMIT }),
   (req, res) => {
     if (!req.body || !req.body.length) {
       return res.status(400).json({ ok: false, error: "Fayl bo'sh yoki yuborilmadi" });
     }
-    let ext = String(req.query.ext || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!ALLOWED_UPLOAD_EXT.has(ext)) {
-      // Kengaytma ruxsat etilmagan yoki noma'lum bo'lsa — Content-Type'dan tахmin qilamiz
-      const mime = String(req.headers['content-type'] || '');
-      if (mime.includes('video')) ext = 'mp4';
-      else if (mime.includes('png')) ext = 'png';
-      else if (mime.includes('webp')) ext = 'webp';
-      else ext = 'jpg';
+
+    const isAdmin = Boolean(req.user?.isAdmin);
+
+    // 1) Hajm cheklovi
+    const sizeLimit = isAdmin ? ADMIN_UPLOAD_LIMIT : USER_UPLOAD_LIMIT;
+    if (req.body.length > sizeLimit) {
+      const limitMb = Math.round(sizeLimit / (1024 * 1024));
+      return res.status(413).json({ ok: false, error: `Fayl juda katta. Maksimal ${limitMb} MB.` });
     }
+
+    // 2) Fayl turini ANIQLASH (taxmin qilish emas)
+    const detectedImage = detectImageExt(req.body);
+    let ext = String(req.query.ext || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    if (!isAdmin) {
+      // Oddiy foydalanuvchi FAQAT rasm yuklaydi va bu haqiqatan rasm
+      // ekanini bayt darajasida tasdiqlaymiz.
+      if (!detectedImage || !ALLOWED_IMAGE_EXT.has(detectedImage)) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Faqat rasm fayllari qabul qilinadi (JPG, PNG yoki WEBP).',
+        });
+      }
+      ext = detectedImage;
+    } else {
+      // Admin video ham yuklashi mumkin. Rasm aniqlangan bo'lsa — haqiqiy
+      // kengaytmani ishlatamiz; aks holda so'ralgan kengaytma ruxsat
+      // etilganlar ro'yxatida bo'lishi SHART.
+      //
+      // ESKI KOD noma'lum kengaytmani Content-Type'dan "taxmin" qilardi:
+      //     if (mime.includes('video')) ext = 'mp4';
+      //     ... else ext = 'jpg';
+      // Natijada .mkv/.avi fayllar .mp4 bo'lib saqlanib, <video> da
+      // ochilmasdi, va istalgan binar fayl .jpg sifatida yozilardi.
+      // Endi noto'g'ri kengaytma RAD ETILADI.
+      if (detectedImage) {
+        ext = detectedImage;
+      } else if (!ALLOWED_UPLOAD_EXT.has(ext)) {
+        return res.status(400).json({
+          ok: false,
+          error: `Ruxsat etilmagan fayl turi. Qabul qilinadi: ${[...ALLOWED_UPLOAD_EXT].join(', ')}`,
+        });
+      }
+    }
+
     const filename = `${Date.now()}_${crypto.randomBytes(8).toString('hex')}.${ext}`;
     const filepath = path.join(UPLOADS_DIR, filename);
     try {
       fs.writeFileSync(filepath, req.body);
+      AuditLogs.add({
+        adminId: req.user.id,
+        action: 'UPLOAD_FILE',
+        targetId: filename,
+        details: `${(req.body.length / 1024).toFixed(0)} KB`,
+      });
       res.json({ ok: true, url: `/uploads/${filename}` });
     } catch (err) {
       console.error('[Upload]', err);

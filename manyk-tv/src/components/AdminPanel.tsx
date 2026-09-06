@@ -810,19 +810,34 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setSecondaryAuthError('');
     if (!pendingAction) return;
 
-    const masterPass = localSettings.secondaryAdminPassword || '8918';
+    // ═══ 3 TA XAVFSIZLIK XATOSI TUZATILDI ═══
+    //
+    // 1) QATTIQ YOZILGAN PAROL: `|| '8918'` — sozlamada parol
+    //    o'rnatilmagan bo'lsa, hamma uchun bir xil ma'lum parol ishlardi.
+    //    Endi parol o'rnatilmagan bo'lsa, bu tekshiruv PAROLNI QABUL
+    //    QILMAYDI (fail-closed) — admin avval o'zining PIN'ini o'rnatishi
+    //    kerak.
+    //
+    // 2) PAROL XATO XABARIDA OSHKOR QILINARDI:
+    //      "...ikkinchi parolni (8918) yoki admin Telegram ID..."
+    //    Ya'ni tekshiruvning o'zi javobni aytib berardi. Olib tashlandi.
+    //
+    // 3) O'Z ID SI QABUL QILINARDI: `cleanInput === currentUser.id`.
+    //    Foydalanuvchining ID si ProfileView'da ekranda ko'rinib turadi —
+    //    ya'ni "ikkinchi faktor" umuman sir emas edi va himoya bermasdi.
+    //    Olib tashlandi: faqat o'rnatilgan PIN qabul qilinadi.
+    const masterPass = (localSettings.secondaryAdminPassword || '').trim();
     const cleanInput = secondaryAuthInput.trim();
 
-    // Check if input matches secondary master password OR any admin Telegram ID OR current user ID
-    const isMasterPassword = cleanInput === masterPass;
-    const isAdminId =
-      (localSettings.adminTelegramIds || []).includes(cleanInput) ||
-      cleanInput === currentUser.id;
-
-    if (!isMasterPassword && !isAdminId) {
+    if (!masterPass) {
       setSecondaryAuthError(
-        "Xavfsizlik paroli yoki Telegram ID noto'g'ri! Iltimos, ikkinchi parolni (8918) yoki admin Telegram ID raqamingizni kiriting."
+        "Xavfsizlik PIN kodi hali o'rnatilmagan. Sozlamalar bo'limida ikkinchi darajali PIN kodni o'rnatib, keyin qayta urinib ko'ring."
       );
+      return;
+    }
+
+    if (cleanInput !== masterPass) {
+      setSecondaryAuthError('Xavfsizlik PIN kodi noto\'g\'ri.');
       return;
     }
 
@@ -2695,7 +2710,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <span>Ikkinchi Darajali Xavfsizlik Paroli (Master PIN)</span>
                   </h4>
                   <span className="text-[10px] bg-amber-950 text-amber-300 border border-amber-800/80 px-2 py-0.5 rounded font-mono">
-                    Standart: 8918
+                    {localSettings.secondaryAdminPassword ? "O'rnatilgan" : "O'rnatilmagan"}
                   </span>
                 </div>
                 <p className="text-[11px] text-zinc-400">
@@ -2707,14 +2722,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </label>
                   <input
                     type="text"
-                    value={localSettings.secondaryAdminPassword || '8918'}
+                    value={localSettings.secondaryAdminPassword || ''}
                     onChange={(e) =>
                       setLocalSettings({
                         ...localSettings,
                         secondaryAdminPassword: e.target.value,
                       })
                     }
-                    placeholder="Masalan: 8918"
+                    placeholder="Yangi PIN kod kiriting (kamida 4 belgi)"
                     className="w-full font-mono bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-amber-300 outline-none focus:border-amber-500"
                   />
                 </div>
@@ -4528,16 +4543,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       setSecondaryAuthInput(e.target.value);
                       setSecondaryAuthError('');
                     }}
-                    placeholder="Master PIN (8918) yoki Admin Telegram ID"
+                    placeholder="Xavfsizlik PIN kodi"
                     className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3.5 py-2.5 text-xs text-white font-mono outline-none focus:border-amber-500"
                   />
                   <div className="absolute right-3 top-2.5 text-zinc-500">
                     <Lock className="w-4 h-4" />
                   </div>
                 </div>
-                <div className="text-[10px] text-zinc-500 mt-1 flex items-center justify-between">
-                  <span>Standart master PIN: 8918</span>
-                  <span>yoki ID: {currentUser.id}</span>
+                <div className="text-[10px] text-zinc-500 mt-1">
+                  {/* ESKI KOD bu yerda PIN kodni ("Standart master PIN: 8918") va
+                    * foydalanuvchi ID sini ochiq ko'rsatardi — ya'ni "ikkinchi
+                    * faktor" ekranda yozib qo'yilgan edi. */}
+                  <span>Sozlamalarda o'rnatilgan ikkinchi darajali PIN kodni kiriting</span>
                 </div>
               </div>
 

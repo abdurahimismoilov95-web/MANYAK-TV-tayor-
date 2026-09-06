@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Phone, CheckCircle2, Bot, ExternalLink, Sparkles, Send } from 'lucide-react';
-import { verifyUserPhone, verifyUserViaBot, getStoredSettings, isUserAdmin } from '../services/storage';
+import { verifyUserPhone, verifyUserViaBot, getStoredSettings } from '../services/storage';
 import { notifyUserVerificationViaTelegram } from '../services/telegramBot';
 import { UserProfile } from '../types';
 
@@ -29,15 +29,18 @@ export const PhoneVerificationModal: React.FC<PhoneVerificationModalProps> = ({
     setLoading(true);
 
     const markVerified = (verifiedPhone: string) => {
-      const isAdmin = isUserAdmin(user.id);
-      if (isAdmin && typeof window !== 'undefined') {
-        localStorage.setItem('manyak_allow_pc_admin', 'true');
-      }
-
+      // ═══ OLIB TASHLANDI ═══
+      // ESKI KOD:
+      //   localStorage.setItem('manyak_allow_pc_admin', 'true');  // soxta belgi
+      //   if (isAdmin) updated.isVip = true;                      // klientda VIP
+      //
+      // `manyak_allow_pc_admin` — brauzerdagi oddiy `true` satri edi va u
+      // avtorizatsiya signali sifatida ishlatilardi; uni konsoldan yozish
+      // mumkin. `updated.isVip = true` esa klientda VIP berardi.
+      // Adminlik ham, VIP ham endi FAQAT serverdan keladi
+      // (`/api/me/entitlements`), shuning uchun bu yerda hech qanday huquq
+      // berilmaydi — faqat telefon tasdiqlanadi.
       const updated = verifyUserViaBot(verifiedPhone);
-      if (isAdmin) {
-        updated.isVip = true;
-      }
 
       // Notify via Telegram bot
       notifyUserVerificationViaTelegram(
