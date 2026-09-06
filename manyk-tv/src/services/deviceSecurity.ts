@@ -119,8 +119,47 @@ export function getOSFamily(
   return 'Other';
 }
 
+/**
+ * Ekran o'lchamini ORIENTATSIYADAN QAT'I NAZAR bir xil ko'rinishga keltiradi.
+ *
+ * SABAB: telefonni aylantirganda `screen.width` va `screen.height` o'rin
+ * almashadi (masalan "1080x2400" -> "2400x1080"). Eski kod bu ikkisini
+ * BOSHQA QURILMA deb hisoblardi va halol foydalanuvchini bloklardi.
+ * Endi o'lchamlar tartiblanadi: har ikki holatda ham "1080x2400".
+ */
+function normalizeResolution(resolution: string): string {
+  const parts = String(resolution || '').split('x').map((n) => parseInt(n, 10));
+  if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n))) return String(resolution || '');
+  const [a, b] = parts.sort((x, y) => x - y);
+  return `${a}x${b}`;
+}
+
+/**
+ * Qurilma xususiyatlarini KESHLASH.
+ *
+ * SABAB: `collectDeviceCharacteristics()` canvas, WebGL kontekst va YANGI
+ * `AudioContext` yaratadi. `App.tsx` esa uni `checkAccessSecurity` orqali
+ * juda tez-tez chaqirardi (har `user` obyekti yangilanganda). Brauzerlar
+ * bir vaqtda ochiq `AudioContext` sonini cheklaydi — limit tugagach
+ * `audioSampleRate` `undefined` bo'lib qolardi va BARMOQ IZI O'ZGARARDI,
+ * ya'ni foydalanuvchi o'z qurilmasida "boshqa qurilma" deb bloklanardi.
+ * Endi bir sessiyada bir marta hisoblanadi.
+ */
+let cachedCharacteristics: DeviceCharacteristics | null = null;
+
+/** Test/diagnostika uchun keshni tozalash. */
+export function clearDeviceCharacteristicsCache(): void {
+  cachedCharacteristics = null;
+}
+
 // Collect comprehensive device characteristics
 export function collectDeviceCharacteristics(): DeviceCharacteristics {
+  if (cachedCharacteristics) return cachedCharacteristics;
+  cachedCharacteristics = computeDeviceCharacteristics();
+  return cachedCharacteristics;
+}
+
+function computeDeviceCharacteristics(): DeviceCharacteristics {
   const nav = typeof navigator !== 'undefined' ? navigator : ({} as Navigator);
   const scr = typeof window !== 'undefined' ? window.screen : { width: 0, height: 0, colorDepth: 0, pixelDepth: 0 };
   const userAgent = nav.userAgent || 'unknown_ua';
@@ -153,20 +192,34 @@ export function collectDeviceCharacteristics(): DeviceCharacteristics {
   };
 }
 
-// Generate a deterministic Hardware ID (HWID) from immutable hardware traits
+/**
+ * Qurilma uchun barqaror HWID hisoblaydi.
+ *
+ * ═══ ESKI KODDA NIMA XATO EDI ═══
+ * Imzoga BARQAROR BO'LMAGAN signallar kirgan edi:
+ *   - `pixelRatio`   — brauzerda masshtab (zoom) o'zgarsa yoki tashqi
+ *                      monitorga ulansa o'zgaradi;
+ *   - `canvasHash`   — brauzer/WebView versiyasi yangilanganda yoki GPU
+ *                      drayveri o'zgarganda rasterizatsiya farq qiladi;
+ *   - `timeZone`     — safarga chiqsa yoki VPN yoqsa o'zgaradi;
+ *   - `screenResolution` — telefonni aylantirsa o'lchamlar o'rin almashadi.
+ *
+ * Ya'ni foydalanuvchi HECH NARSA QILMASA HAM HWID o'zgarib ketardi va u
+ * o'z qurilmasida "ruxsatsiz qurilma" deb bloklanardi.
+ *
+ * Endi imzoda faqat haqiqatan barqaror apparat belgilari qoladi.
+ */
 export function generateHWIDFromCharacteristics(chars: DeviceCharacteristics): string {
   const hardwareSignature = [
     chars.osFamily,
     chars.platform,
     chars.hardwareConcurrency,
-    chars.screenResolution,
+    // Orientatsiyadan qat'i nazar bir xil
+    normalizeResolution(chars.screenResolution),
     chars.colorDepth,
-    chars.pixelRatio,
     chars.maxTouchPoints > 0 ? 'touch' : 'mouse',
     chars.webglVendor,
     chars.webglRenderer,
-    chars.canvasHash,
-    chars.timeZone,
   ].join(':::');
 
   const hash = simpleHash(hardwareSignature);
@@ -287,38 +340,73 @@ export function evaluateDeviceDeviation(
       deviationScore += 45;
       reasons.push(`Video karta (GPU) butunlay boshqa: avvalgi (${bound.webglRenderer}) vs joriy (${current.webglRenderer})`);
     } else {
-      deviationScore += 15;
+      // Bir xil GPU oilasi, lekin renderer satri boshqa — bu odatda
+      // DRAYVER YOKI BRAUZER YANGILANISHI (masalan "ANGLE (Apple, Apple M1,
+      // OpenGL 4.1)" satrining versiya qismi o'zgarishi). Ilgari bu +15 ball
+      // olardi va boshqa "yumshoq" signallar bilan qo'shilib bloklashga
+      // yetib borardi. Endi faqat ma'lumot.
+      reasons.push(`[ma'lumot] GPU renderer satri o'zgargan (drayver/brauzer yangilanishi bo'lishi mumkin)`);
     }
   }
 
-  // 4. CPU Hardware Concurrency (Cores Count Difference >= 2)
+  // ═══════════════════════════════════════════════════════════════════════
+  //  QUYIDAGI SIGNALLAR BALL BERMAYDI — FAQAT MA'LUMOT UCHUN
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ESKI KODDA bu signallar ball berardi va chegara 40 edi. Natijada
+  // HALOL FOYDALANUVCHI HECH NARSA QILMASDAN BLOKLANARDI:
+  //
+  //   ekran o'lchami (+25) + canvas (+20)            = 45 >= 40  ❌ BLOK
+  //   ekran o'lchami (+25) + vaqt mintaqasi (+15)     = 40 >= 40  ❌ BLOK
+  //   canvas (+20) + vaqt mintaqasi (+15) + CPU (+25) = 60 >= 40  ❌ BLOK
+  //
+  // Amaldagi holatlar:
+  //   - telefonni AYLANTIRISH -> `screen.width/height` o'rin almashadi
+  //     (bu endi `normalizeResolution` bilan hal qilindi);
+  //   - Telegram WebView yoki brauzer YANGILANISHI -> canvas
+  //     rasterizatsiyasi va GPU drayver satri o'zgaradi;
+  //   - SAFAR yoki VPN -> vaqt mintaqasi o'zgaradi;
+  //   - qurilma yuklamasi ostida `hardwareConcurrency` boshqa qiymat
+  //     qaytarishi mumkin.
+  //
+  // Bularning hech biri "boshqa odam boshqa qurilmadan kirdi" degani EMAS.
+  // Shuning uchun ular endi faqat `reasons` ga yozib qo'yiladi (diagnostika
+  // va admin uchun), lekin BLOKLASHGA sabab bo'lmaydi.
+
+  // 4. CPU yadrolari (faqat ma'lumot)
   if (
     bound.hardwareConcurrency &&
     current.hardwareConcurrency &&
     Math.abs(bound.hardwareConcurrency - current.hardwareConcurrency) >= 2
   ) {
-    deviationScore += 25;
     reasons.push(
-      `CPU yadrolari soni farq qiladi: avvalgi (${bound.hardwareConcurrency}) vs joriy (${current.hardwareConcurrency})`
+      `[ma'lumot] CPU yadrolari soni farq qiladi: avvalgi (${bound.hardwareConcurrency}) vs joriy (${current.hardwareConcurrency})`
     );
   }
 
-  // 5. Screen Resolution & Form Factor (>25% total pixel difference)
-  if (bound.screenResolution && current.screenResolution && bound.screenResolution !== current.screenResolution) {
-    const [bw, bh] = bound.screenResolution.split('x').map(Number);
-    const [cw, ch] = current.screenResolution.split('x').map(Number);
+  // 5. Ekran o'lchami — ORIENTATSIYA HISOBGA OLINADI va faqat JUDA katta
+  //    farq ball beradi (telefon -> televizor kabi holatlar).
+  const boundRes = normalizeResolution(bound.screenResolution);
+  const currentRes = normalizeResolution(current.screenResolution);
+  if (boundRes && currentRes && boundRes !== currentRes) {
+    const [bw, bh] = boundRes.split('x').map(Number);
+    const [cw, ch] = currentRes.split('x').map(Number);
     if (bw && bh && cw && ch) {
       const bPixels = bw * bh;
       const cPixels = cw * ch;
       const ratioDiff = Math.abs(bPixels - cPixels) / Math.max(bPixels, cPixels);
-      if (ratioDiff > 0.25) {
-        deviationScore += 25;
-        reasons.push(`Ekran o'lchami keskin farq qiladi: avvalgi (${bound.screenResolution}) vs joriy (${current.screenResolution})`);
+      // Chegara 25% dan 60% ga oshirildi va ball 25 dan 15 ga tushirildi —
+      // ya'ni bu signal YOLG'IZ O'ZI bloklashga yetmaydi.
+      if (ratioDiff > 0.6) {
+        deviationScore += 15;
+        reasons.push(`Ekran o'lchami juda katta farq qiladi: avvalgi (${boundRes}) vs joriy (${currentRes})`);
+      } else {
+        reasons.push(`[ma'lumot] Ekran o'lchami o'zgargan: avvalgi (${boundRes}) vs joriy (${currentRes})`);
       }
     }
   }
 
-  // 6. Canvas Fingerprint Rasterization
+  // 6. Canvas barmoq izi (faqat ma'lumot — brauzer yangilanishida o'zgaradi)
   if (
     bound.canvasHash &&
     current.canvasHash &&
@@ -326,17 +414,20 @@ export function evaluateDeviceDeviation(
     current.canvasHash !== 'CANVAS_FALLBACK' &&
     bound.canvasHash !== current.canvasHash
   ) {
-    deviationScore += 20;
-    reasons.push("Grafik render (Canvas) barmoq izi mos kelmadi");
+    reasons.push("[ma'lumot] Grafik render (Canvas) barmoq izi o'zgargan");
   }
 
-  // 7. Timezone Jump
+  // 7. Vaqt mintaqasi (faqat ma'lumot — safar/VPN halol holat)
   if (bound.timeZone && current.timeZone && bound.timeZone !== current.timeZone) {
-    deviationScore += 15;
-    reasons.push(`Vaqt mintaqasi farq qiladi: avvalgi (${bound.timeZone}) vs joriy (${current.timeZone})`);
+    reasons.push(`[ma'lumot] Vaqt mintaqasi o'zgargan: avvalgi (${bound.timeZone}) vs joriy (${current.timeZone})`);
   }
 
-  // Strict Threshold: score >= 40 indicates significant deviation from previous session
+  // ═══ CHEGARA ═══
+  // 40 ball — faqat KUCHLI va BARQAROR signallar bilan erishiladi:
+  //   operatsion tizim o'zgarishi (55), mobil<->desktop (40),
+  //   GPU oilasi butunlay boshqa (45).
+  // Ya'ni endi bloklash faqat haqiqatan boshqa qurilmadan kirilganda
+  // yuz beradi; yuqoridagi "yumshoq" signallar buni keltirib chiqara olmaydi.
   const isSignificantDeviation = deviationScore >= 40;
 
   const boundSummary = `${bound.osFamily} (${bound.webglRenderer && bound.webglRenderer !== 'unknown_renderer' ? bound.webglRenderer : bound.platform}, ${bound.screenResolution})`;
@@ -446,38 +537,69 @@ export function checkAccessSecurity(
   return { isAllowed: true };
 }
 
-// Reset HWID binding for a user (Called by Admin when user genuinely changes device)
+// localStorage kalitlari — storage.ts dagi KEYS bilan AYNAN bir xil bo'lishi shart.
+// (Bu modul storage.ts ni import qila olmaydi: storage.ts allaqachon shu
+// modulni import qiladi, ya'ni aylanma bog'liqlik (circular import) chiqadi.)
+const USERS_STORAGE_KEY = 'manyak_tv_all_users_v1';
+const CURRENT_USER_STORAGE_KEY = 'manyak_tv_current_user_v1';
+
+/**
+ * Foydalanuvchining qurilmaga bog'lanishini (HWID binding) bekor qiladi —
+ * admin foydalanuvchi haqiqatan telefon almashtirganda chaqiradi.
+ *
+ * ═══ TUZATILGAN XATO: FUNKSIYA HECH NARSA QILMASDAN "true" QAYTARARDI ═══
+ *
+ * ESKI KOD `'manyak_tv_users_v1'` kalitidan o'qirdi/yozardi, HAQIQIY kalit
+ * esa `'manyak_tv_all_users_v1'` (qarang storage.ts `KEYS.USERS`). Bunday
+ * kalit hech qachon mavjud bo'lmagani uchun `if (rawUsers)` sharti doim
+ * `false` bo'lardi — ya'ni foydalanuvchilar katalogidagi bog'lanish
+ * O'CHIRILMASDI. Funksiya esa oxirida shartsiz `return true` qilardi.
+ *
+ * Amaldagi oqibati: HWID tufayli qulflanib qolgan foydalanuvchini admin
+ * "ochib berdi" deb o'ylardi (interfeys muvaffaqiyat ko'rsatardi), lekin
+ * foydalanuvchi baribir qulflangan holatda qolardi va yordam so'rashda
+ * davom etardi.
+ *
+ * Endi to'g'ri kalit ishlatiladi va funksiya HAQIQATAN o'zgarish
+ * bo'lgan-bo'lmaganini qaytaradi.
+ */
 export function resetUserHWIDBinding(userId: string): boolean {
   try {
     if (typeof localStorage === 'undefined') return false;
 
-    // Update in all users directory
-    const rawUsers = localStorage.getItem('manyak_tv_users_v1');
+    let didReset = false;
+
+    // Foydalanuvchilar katalogidagi yozuv
+    const rawUsers = localStorage.getItem(USERS_STORAGE_KEY);
     if (rawUsers) {
       const users: UserProfile[] = JSON.parse(rawUsers);
-      const user = users.find((u) => u.id === userId);
+      const user = Array.isArray(users) ? users.find((u) => u.id === userId) : undefined;
       if (user) {
         delete user.hwidBinding;
         user.deviceToken = undefined;
-        localStorage.setItem('manyak_tv_users_v1', JSON.stringify(users));
+        localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+        didReset = true;
       }
     }
 
-    // Update in current user session if it matches
-    const rawCurrent = localStorage.getItem('manyak_tv_current_user_v1');
+    // Joriy sessiya shu foydalanuvchiga tegishli bo'lsa — uni ham
+    const rawCurrent = localStorage.getItem(CURRENT_USER_STORAGE_KEY);
     if (rawCurrent) {
       const current: UserProfile = JSON.parse(rawCurrent);
-      if (current.id === userId) {
+      if (current && current.id === userId) {
         delete current.hwidBinding;
         current.deviceToken = undefined;
-        localStorage.setItem('manyak_tv_current_user_v1', JSON.stringify(current));
+        localStorage.setItem(CURRENT_USER_STORAGE_KEY, JSON.stringify(current));
+        didReset = true;
       }
     }
 
-    if (typeof window !== 'undefined') {
+    if (didReset && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('manyak_storage_update'));
     }
-    return true;
+
+    // ESKI KOD shartsiz `true` qaytarardi. Endi haqiqiy natija.
+    return didReset;
   } catch (err) {
     console.error('Error resetting HWID binding', err);
     return false;
