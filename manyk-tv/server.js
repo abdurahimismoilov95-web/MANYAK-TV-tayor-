@@ -23,7 +23,8 @@ import rateLimit from 'express-rate-limit';
 import {
   Users, Receipts, Contents, Plans, PromoCodes, WatchHistory,
   Favorites, Settings, Admins, AuditLogs, BannedDevices,
-  DailyCheckIn, TokenUnlock, Stats, seedIfEmpty, SUPER_ADMIN_ID, db
+  DailyCheckIn, TokenUnlock, Stats, VerificationCodes,
+  seedIfEmpty, SUPER_ADMIN_ID, db
 } from './database.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -248,25 +249,24 @@ app.post('/api/auth/verify', (req, res) => {
     const user = JSON.parse(params.get('user') || '{}');
     if (!user.id) return res.status(400).json({ ok: false, error: 'User topilmadi' });
 
+    // AVTOMATIK ADMIN: `.env` da (SUPER_ADMIN_ID yoki ADMIN_IDS) ko'rsatilgan
+    // Telegram ID egasi ro'yxatdan o'tishi bilanoq admin bo'ladi va
+    // `appointed_admins` jadvaliga ham yozib qo'yiladi.
+    Admins.ensureEnvAdmin(String(user.id), {
+      name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || `Admin #${user.id}`,
+      username: user.username || '',
+    });
     const isAdmin = Admins.isAdmin(String(user.id));
     const token = jwt.sign({ id: String(user.id), username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
 
-    // Upsert user in DB
-    const existing = Users.getById(String(user.id));
-    if (!existing) {
-      Users.upsert({
-        id: String(user.id), firstName: user.first_name || '', lastName: user.last_name || '',
-        username: user.username || '', isVip: isAdmin, createdAt: new Date().toISOString(),
-        lastLoginAt: new Date().toISOString(), purchasedContentIds: [], accessTokens: 0,
-      });
-    } else {
-      existing.firstName = user.first_name || existing.firstName;
-      existing.lastName = user.last_name || existing.lastName;
-      existing.lastLoginAt = new Date().toISOString();
-      Users.upsert(existing);
-    }
+    // ESKI KOD `username` ni FAQAT yangi foydalanuvchi yaratilganda yozardi;
+    // mavjud foydalanuvchida esa `firstName`/`lastName` ni yangilab,
+    // `username` ni TEGMASDAN qoldirardi. Ya'ni foydalanuvchi Telegramda
+    // username'ini o'zgartirsa, saytda ESKISI qolib ketardi.
+    // `syncTelegramProfile` bu ishni bitta joyda va to'g'ri bajaradi.
+    const dbUser = Users.syncTelegramProfile(user);
 
-    res.json({ ok: true, token, user: Users.getById(String(user.id)), isAdmin });
+    res.json({ ok: true, token, user: dbUser, isAdmin });
   } catch (err) {
     console.error('[Auth]', err);
     res.status(500).json({ ok: false, error: 'Auth xatosi' });
@@ -724,6 +724,99 @@ app.post('/api/tokens/unlock', auth, ownerOrAdmin('userId'), (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  TELEGRAM BOT ORQALI TASDIQLASH (telefon tasdiqlash O'RNIGA)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ESKI OQIM: sayt telefon raqamini so'rardi va `isPhoneVerified = true` ni
+// KLIENT tomonida localStorage'ga yozardi. Ikki muammo:
+//   1) hech qanday haqiqiy tasdiqlash yo'q edi — istalgan raqam yozilardi;
+//   2) `isPhoneVerified` `SERVER_OWNED_USER_FIELDS` ro'yxatida bo'lgani
+//      uchun `/api/sync-user` uni server qiymati bilan QAYTA YOZARDI, ya'ni
+//      klient tasdiqlashi baribir yo'qolardi.
+//
+// YANGI OQIM (bot orqali, server tomonida):
+//   1) sayt      -> POST /api/verify/start        -> { code, deepLink }
+//   2) foydalanuvchi deepLink ni ochadi           -> bot /start <code>
+//   3) bot kontakt so'raydi, foydalanuvchi yuboradi
+//   4) server `contact.user_id === from.id` ni tekshirib tasdiqlaydi
+//   5) sayt      -> GET /api/verify/status?code=  -> { verified, token, user }
+//
+// Mini App ichida (initData mavjud) bu oqim kerak emas — `/api/auth/verify`
+// darhol token beradi, lekin kontakt tasdiqlash baribir bot orqali bo'ladi.
+
+/** Kod uchun chalkashmaydigan alfavit (0/O, 1/I/l kabi belgilar yo'q). */
+const VERIFY_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+function generateVerifyCode(length = 10) {
+  const bytes = crypto.randomBytes(length);
+  let out = '';
+  for (let i = 0; i < length; i++) out += VERIFY_CODE_ALPHABET[bytes[i] % VERIFY_CODE_ALPHABET.length];
+  return out;
+}
+
+// Bu endpoint autentifikatsiyasiz — hali tasdiqlanmagan tashrifchi uchun.
+// Zararsiz: kod o'z-o'zidan hech qanday huquq bermaydi, u faqat Telegram
+// tomonida kontakt yuborilgandan keyin ishlaydi.
+const verifyStartLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+
+app.post('/api/verify/start', verifyStartLimiter, (req, res) => {
+  if (!BOT_TOKEN) {
+    return res.status(503).json({ ok: false, error: 'Bot sozlanmagan. Administrator bilan bog\'laning.' });
+  }
+
+  const botUsername = Settings.get().botUsername || process.env.BOT_USERNAME || '';
+  if (!botUsername) {
+    return res.status(503).json({ ok: false, error: 'Bot username sozlanmagan.' });
+  }
+
+  const code = generateVerifyCode();
+  VerificationCodes.create(code);
+
+  res.json({
+    ok: true,
+    code,
+    botUsername: String(botUsername).replace('@', ''),
+    deepLink: `https://t.me/${String(botUsername).replace('@', '')}?start=${code}`,
+    expiresInSeconds: 15 * 60,
+  });
+});
+
+// Sayt shu endpointni davriy so'rab turadi (SSE ham bor, lekin tasdiqlashdan
+// OLDIN foydalanuvchi hali autentifikatsiya qilinmagani uchun SSE ulanishi
+// yo'q — shu sababli polling ishonchli variant).
+app.get('/api/verify/status', (req, res) => {
+  const row = VerificationCodes.getByCode(req.query.code);
+  if (!row) return res.status(404).json({ ok: false, error: 'Kod topilmadi' });
+
+  if (VerificationCodes.isExpired(row)) {
+    return res.json({ ok: true, status: 'expired', verified: false });
+  }
+
+  if (row.status !== 'verified') {
+    // 'pending' — foydalanuvchi hali botni ochmagan
+    // 'awaiting_contact' — botni ochgan, kontakt kutilmoqda
+    return res.json({ ok: true, status: row.status, verified: false });
+  }
+
+  // Kod BIR MARTALIK: token allaqachon olingan bo'lsa qayta bermaymiz
+  if (row.claimed_at) {
+    return res.status(410).json({ ok: false, error: 'Bu kod allaqachon ishlatilgan' });
+  }
+
+  const user = Users.getById(String(row.telegram_id));
+  if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
+
+  // Avtomatik admin: .env da ko'rsatilgan bo'lsa jadvalga ham yozamiz
+  Admins.ensureEnvAdmin(user.id, { name: user.firstName, username: user.username });
+  const isAdmin = Admins.isAdmin(user.id);
+
+  const token = jwt.sign({ id: user.id, username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
+  VerificationCodes.markClaimed(row.code);
+
+  res.json({ ok: true, status: 'verified', verified: true, token, user, isAdmin });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  ENTITLEMENTS API — pul bilan bog'liq holatning YAGONA HAQIQAT MANBASI
 // ═══════════════════════════════════════════════════════════════════════════
 //
@@ -841,8 +934,6 @@ app.post('/webhook', async (req, res) => {
 async function handleTelegramUpdate(update) {
   if (!update) return;
 
-  const adminIds = [SUPER_ADMIN_ID, ...(process.env.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean)];
-
   const processCmd = async (receiptId, decision, fromId, chatId, cbId) => {
     const result = Receipts.review(receiptId, fromId, decision);
 
@@ -878,33 +969,279 @@ async function handleTelegramUpdate(update) {
     const from = String(update.callback_query.from?.id || '');
     const data = String(update.callback_query.data || '');
     const chat = update.callback_query.message?.chat?.id;
-    if (!adminIds.includes(from)) { await tgAnswer(update.callback_query.id, '❌ Ruxsat yo\'q'); return; }
+    if (!isBotAdmin(from)) { await tgAnswer(update.callback_query.id, '❌ Ruxsat yo\'q'); return; }
     if (data.startsWith('approve:')) await processCmd(data.replace('approve:', ''), 'approved', from, chat, update.callback_query.id);
     else if (data.startsWith('reject:')) await processCmd(data.replace('reject:', ''), 'rejected', from, chat, update.callback_query.id);
+    return;
   }
 
-  if (update.message?.text) {
-    const from = String(update.message.from?.id || '');
-    const txt = update.message.text.trim();
-    const chat = update.message.chat?.id;
-    if (!adminIds.includes(from)) return;
-    if (txt.startsWith('/approve_')) await processCmd(txt.replace('/approve_', ''), 'approved', from, chat);
-    else if (txt.startsWith('/reject_')) await processCmd(txt.replace('/reject_', ''), 'rejected', from, chat);
-    else if (txt === '/start') await tgSend(chat, `✅ <b>MANYK TV Bot</b>\nBuyruqlar:\n/approve_ID\n/reject_ID`);
-    else if (txt === '/stats') {
-      const s = Stats.dashboard();
-      await tgSend(chat, `📊 <b>Statistika</b>\nFoydalanuvchilar: ${s.totalUsers}\nVIP: ${s.vipUsers}\nKontentlar: ${s.totalContent}\nKutilayotgan cheklar: ${s.pendingReceipts}\nDaromad: ${s.totalRevenue} so'm`);
+  const message = update.message;
+  if (!message?.from) return;
+
+  const from = String(message.from.id);
+  const chat = message.chat?.id;
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  1) TELEGRAM PROFILINI HAR ALOQADA SINXRONLASH
+  // ═══════════════════════════════════════════════════════════════════════
+  // TALAB: "username ham Telegramdagidek bo'lsin — foydalanuvchi Telegramda
+  // username'ini o'zgartirsa, saytdagi ham avtomatik o'zgarishi kerak".
+  // Telegram username o'zgarganini alohida xabar qilmaydi, lekin HAR BIR
+  // update ichida `from` obyektini yuboradi. Shuning uchun bot bilan har
+  // qanday aloqa — username sinxronlash nuqtasi.
+  // Foydalanuvchi ID si ham AYNAN Telegram ID (`from.id`) bo'ladi.
+  Users.syncTelegramProfile(message.from);
+
+  // .env da ko'rsatilgan admin bo'lsa — avtomatik ro'yxatga olamiz
+  Admins.ensureEnvAdmin(from, {
+    name: `${message.from.first_name || ''} ${message.from.last_name || ''}`.trim() || `Admin #${from}`,
+    username: message.from.username || '',
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  2) KONTAKT KELDI — FOYDALANUVCHINI TASDIQLASH
+  // ═══════════════════════════════════════════════════════════════════════
+  // Bu telefon raqami orqali SMS tasdiqlash o'rniga ishlatiladi.
+  if (message.contact) {
+    await handleContactVerification(message, from, chat);
+    return;
+  }
+
+  const txt = String(message.text || '').trim();
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  3) /start — HAR QANDAY foydalanuvchi uchun
+  // ═══════════════════════════════════════════════════════════════════════
+  // ESKI KOD: `if (!adminIds.includes(from)) return;` — ya'ni oddiy
+  // foydalanuvchi botga yozsa bot BUTUNLAY JIM turardi ("bot ishlamayapti").
+  // Endi bot avvalo oddiy foydalanuvchiga xizmat qiladi.
+  if (txt.startsWith('/start')) {
+    // Deep link: `/start <kod>` — sayt bergan bir martalik kod
+    const parts = txt.split(/\s+/);
+    const code = parts.length > 1 ? parts[1].trim() : '';
+
+    if (code) {
+      const attached = VerificationCodes.attachChat(code, from, chat);
+      if (!attached) {
+        await tgSend(chat, [
+          "⚠️ <b>Tasdiqlash kodi yaroqsiz yoki muddati tugagan.</b>",
+          '',
+          'Iltimos, saytga qaytib "Telegram orqali tasdiqlash" tugmasini qaytadan bosing.',
+        ].join('\n'));
+        return;
+      }
     }
+
+    const user = Users.getById(from);
+    if (user?.isPhoneVerified) {
+      await tgSend(chat, [
+        `✅ <b>Salom, ${escapeTgHtml(user.firstName)}!</b>`,
+        '',
+        'Hisobingiz allaqachon tasdiqlangan — saytdan bemalol foydalanishingiz mumkin.',
+      ].join('\n'), buildOpenAppKeyboard());
+
+      // Sayt kod orqali kutib turgan bo'lsa, uni ham darhol yopamiz
+      if (code) {
+        VerificationCodes.markVerified(code, from, user.phone);
+        sendToUser(from, { type: 'verification_complete' });
+      }
+      return;
+    }
+
+    // Kontakt so'raymiz — bu tasdiqlashning YAGONA usuli
+    await tgSendWithKeyboard(chat, [
+      `👋 <b>MANYAK TV ga xush kelibsiz!</b>`,
+      '',
+      "Hisobingizni tasdiqlash uchun pastdagi <b>«📱 Kontaktni yuborish»</b> tugmasini bosing.",
+      '',
+      "🔒 Kontakt faqat hisobingizni tasdiqlash uchun ishlatiladi.",
+    ].join('\n'), {
+      keyboard: [[{ text: '📱 Kontaktni yuborish', request_contact: true }]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    });
+    return;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  4) ADMIN BUYRUQLARI
+  // ═══════════════════════════════════════════════════════════════════════
+  if (!isBotAdmin(from)) {
+    // Oddiy foydalanuvchiga tushunarli javob (ilgari mutlaq sukunat edi)
+    await tgSend(chat, [
+      "ℹ️ Bu bot MANYAK TV hisobingizni tasdiqlash uchun.",
+      '',
+      'Tasdiqlash uchun /start buyrug\'ini yuboring.',
+    ].join('\n'));
+    return;
+  }
+
+  if (txt.startsWith('/approve_')) await processCmd(txt.replace('/approve_', ''), 'approved', from, chat);
+  else if (txt.startsWith('/reject_')) await processCmd(txt.replace('/reject_', ''), 'rejected', from, chat);
+  else if (txt === '/stats') {
+    const s = Stats.dashboard();
+    await tgSend(chat, `📊 <b>Statistika</b>\nFoydalanuvchilar: ${s.totalUsers}\nVIP: ${s.vipUsers}\nKontentlar: ${s.totalContent}\nKutilayotgan cheklar: ${s.pendingReceipts}\nDaromad: ${s.totalRevenue} so'm`);
+  } else if (txt === '/help') {
+    await tgSend(chat, [
+      `🛠 <b>Admin buyruqlari</b>`,
+      '/stats — statistika',
+      '/approve_&lt;chek_id&gt; — chekni tasdiqlash',
+      '/reject_&lt;chek_id&gt; — chekni rad etish',
+    ].join('\n'));
   }
 }
 
-async function tgSend(chatId, text) {
-  if (!BOT_TOKEN || !chatId) return;
-  try { await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }) }); } catch {}
+/**
+ * Telegram kontakti orqali tasdiqlash — SMS/telefon tasdiqlash o'rniga.
+ *
+ * XAVFSIZLIK: Telegram'da foydalanuvchi BOSHQA odamning kontaktini ham
+ * yuborishi mumkin (adres kitobidan). Bunday holatda `contact.user_id`
+ * yuboruvchining `from.id` siga TENG BO'LMAYDI. Shuning uchun faqat
+ * o'zining kontaktini qabul qilamiz — aks holda istalgan odam boshqa
+ * kishining raqami bilan hisob tasdiqlab olardi.
+ */
+async function handleContactVerification(message, from, chat) {
+  const contact = message.contact;
+  const contactOwnerId = contact.user_id != null ? String(contact.user_id) : null;
+
+  if (!contactOwnerId || contactOwnerId !== from) {
+    await tgSend(chat, [
+      "⚠️ <b>Bu sizning kontaktingiz emas.</b>",
+      '',
+      "Iltimos, boshqa odamning raqamini emas, <b>o'zingizning</b> kontaktingizni yuboring —",
+      "pastdagi «📱 Kontaktni yuborish» tugmasidan foydalaning.",
+    ].join('\n'));
+    return;
+  }
+
+  const phone = String(contact.phone_number || '').trim();
+  const normalizedPhone = phone.startsWith('+') ? phone : `+${phone}`;
+
+  // Profilni sinxronlab, keyin tasdiqlaymiz
+  Users.syncTelegramProfile(message.from);
+  const user = Users.verifyByContact(from, normalizedPhone);
+  if (!user) {
+    await tgSend(chat, "⚠️ Hisob topilmadi. Iltimos /start buyrug'ini qaytadan yuboring.");
+    return;
+  }
+
+  // Shu suhbat uchun sayt kutib turgan kod bo'lsa — uni yopamiz
+  const pending = VerificationCodes.findAwaitingByChat(chat);
+  if (pending) {
+    VerificationCodes.markVerified(pending.code, from, normalizedPhone);
+  }
+
+  // Sayt real-time yangilanishi uchun SSE
+  sendToUser(from, { type: 'verification_complete' });
+  broadcastToAdmins({ type: 'user_verified', userId: from });
+
+  const isAdminUser = Admins.isAdmin(from);
+
+  await tgSend(chat, [
+    `✅ <b>Hisobingiz tasdiqlandi!</b>`,
+    '',
+    `👤 <b>Ism:</b> ${escapeTgHtml(user.firstName)} ${escapeTgHtml(user.lastName || '')}`.trim(),
+    user.username ? `🔗 <b>Username:</b> @${escapeTgHtml(user.username)}` : '',
+    `🆔 <b>ID:</b> <code>${from}</code>`,
+    `📞 <b>Telefon:</b> ${escapeTgHtml(normalizedPhone)}`,
+    '',
+    isAdminUser
+      ? '👑 Sizga <b>administrator</b> huquqi berildi.'
+      : '🎬 Endi saytda barcha imkoniyatlardan foydalanishingiz mumkin.',
+  ].filter(Boolean).join('\n'), buildOpenAppKeyboard());
+
+  // Adminlarga xabar (faqat adminlarga — oddiy foydalanuvchilar ko'rmaydi)
+  const adminReport = [
+    `🔔 <b>Yangi foydalanuvchi tasdiqlandi</b>`,
+    `👤 ${escapeTgHtml(user.firstName)} ${user.username ? `(@${escapeTgHtml(user.username)})` : ''}`,
+    `🆔 <code>${from}</code>`,
+    `📞 ${escapeTgHtml(normalizedPhone)}`,
+  ].join('\n');
+  for (const adminId of botAdminIds()) {
+    if (adminId === from) continue;
+    await tgSend(adminId, adminReport);
+  }
 }
+
+// ─── Telegram yordamchilari ─────────────────────────────────────────────────
+
+/** Telegram HTML parse_mode uchun maxsus belgilarni himoyalaydi. */
+function escapeTgHtml(text) {
+  if (text == null) return '';
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Bot uchun admin ID lari.
+ *
+ * ESKI KOD faqat `.env` dagi ro'yxatni o'qirdi va admin panelidan
+ * tayinlangan adminlarni butunlay e'tiborsiz qoldirardi — natijada web
+ * panelda admin bo'lgan odam botda "❌ Ruxsat yo'q" javobini olardi
+ * (ikki xil avtorizatsiya manbasi). Endi ikkisi ham `Admins.isAdmin`
+ * orqali bitta joydan tekshiriladi.
+ */
+function botAdminIds() {
+  const ids = new Set([String(SUPER_ADMIN_ID)]);
+  for (const id of String(process.env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+    ids.add(id);
+  }
+  try {
+    for (const a of Admins.getAll()) ids.add(String(a.id));
+  } catch (err) {
+    console.error('[Bot] Adminlar ro\'yxatini o\'qishda xatolik:', err);
+  }
+  return [...ids];
+}
+
+function isBotAdmin(userId) {
+  return Admins.isAdmin(String(userId));
+}
+
+/** Saytni ochish tugmasi (APP_URL sozlangan bo'lsa). */
+function buildOpenAppKeyboard() {
+  const appUrl = process.env.APP_URL;
+  if (!appUrl || !appUrl.startsWith('https://')) return null;
+  return {
+    inline_keyboard: [[{ text: '🎬 MANYAK TV ni ochish', web_app: { url: appUrl } }]],
+  };
+}
+
+async function tgApi(method, payload) {
+  if (!BOT_TOKEN) return { ok: false, description: 'BOT_TOKEN sozlanmagan' };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err) {
+    console.error(`[Telegram ${method}]`, err);
+    return { ok: false, description: String(err) };
+  }
+}
+
+async function tgSend(chatId, text, replyMarkup) {
+  if (!BOT_TOKEN || !chatId) return { ok: false };
+  const payload = { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  return tgApi('sendMessage', payload);
+}
+
+/** Oddiy (pastdagi) klaviatura bilan yuborish — kontakt so'rash uchun. */
+async function tgSendWithKeyboard(chatId, text, keyboard) {
+  if (!BOT_TOKEN || !chatId) return { ok: false };
+  return tgApi('sendMessage', {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    reply_markup: keyboard,
+  });
+}
+
 async function tgAnswer(cbId, text) {
-  if (!BOT_TOKEN || !cbId) return;
-  try { await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callback_query_id: cbId, text }) }); } catch {}
+  if (!BOT_TOKEN || !cbId) return { ok: false };
+  return tgApi('answerCallbackQuery', { callback_query_id: cbId, text });
 }
 
 app.post('/api/broadcast', auth, adminOnly, async (req, res) => {
@@ -1131,6 +1468,41 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Bot holatini admin ko'rishi uchun diagnostika endpointi
+app.get('/api/bot/status', auth, adminOnly, async (req, res) => {
+  if (!BOT_TOKEN) {
+    return res.json({ ok: true, configured: false, reason: 'TELEGRAM_BOT_TOKEN .env da yo\'q' });
+  }
+  const me = await tgApi('getMe', {});
+  const info = await tgApi('getWebhookInfo', {});
+  const appUrl = process.env.APP_URL || null;
+  res.json({
+    ok: true,
+    configured: Boolean(me.ok),
+    bot: me.ok ? { id: me.result.id, username: me.result.username } : null,
+    botError: me.ok ? null : me.description,
+    appUrl,
+    expectedWebhook: appUrl ? `${appUrl.replace(/\/+$/, '')}/webhook` : null,
+    webhook: info.ok ? {
+      url: info.result.url || null,
+      pendingUpdateCount: info.result.pending_update_count,
+      lastErrorMessage: info.result.last_error_message || null,
+      lastErrorDate: info.result.last_error_date || null,
+    } : null,
+  });
+});
+
+// Webhookni qo'lda qayta o'rnatish (diagnostika uchun)
+app.post('/api/bot/reconnect', auth, adminOnly, async (req, res) => {
+  try {
+    await setupBotWebhook();
+    const info = await tgApi('getWebhookInfo', {});
+    res.json({ ok: true, webhook: info.ok ? info.result : null });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
 // ─── Static (production) ──────────────────────────────────────────────────
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
@@ -1181,6 +1553,100 @@ function runExpirySweep() {
 runExpirySweep();                                   // boot paytida bir marta
 const expiryTimer = setInterval(runExpirySweep, 60 * 60 * 1000); // keyin har soatda
 expiryTimer.unref?.();
+
+// Eskirgan tasdiqlash kodlarini tozalash
+VerificationCodes.cleanupExpired();
+const verifyCleanupTimer = setInterval(() => {
+  try {
+    VerificationCodes.cleanupExpired();
+  } catch (err) {
+    console.error('[Verify] Kodlarni tozalashda xatolik:', err);
+  }
+}, 15 * 60 * 1000);
+verifyCleanupTimer.unref?.();
+
+// ─── BOTNI AVTOMATIK ULASH ──────────────────────────────────────────────────
+//
+// ═══ "BOT ISHLAMAYAPTI" MUAMMOSINING ASOSIY SABABI ═══
+//
+// 1) WEBHOOK HECH QACHON RO'YXATDAN O'TMASDI. `/api/setup-webhook` endpointi
+//    bor edi, lekin uni admin JWT bilan QO'LDA chaqirish kerak edi — bu esa
+//    tovuq-tuxum muammosi: JWT olish uchun Mini App'ni ochish kerak, Mini App
+//    ishlashi uchun bot sozlangan bo'lishi kerak. Natijada Telegram
+//    serverimizga hech qanday update yubormasdi va bot butunlay jim turardi.
+//
+// 2) BRAUZERDAN getUpdates POLLING. `src/services/telegramBot.ts` dagi
+//    `fetchAndProcessBotCommands` bevosita brauzerdan
+//    `api.telegram.org/bot<token>/getUpdates` ni chaqirardi. Telegram
+//    webhook o'rnatilgan bo'lsa `getUpdates` ni RAD ETADI (409 Conflict) —
+//    ya'ni ikkisi bir vaqtda ISHLAMAYDI. Bundan tashqari u bot tokenini
+//    brauzerga chiqarardi va server botidan update'larni "o'g'irlardi".
+//    O'sha kod endi butunlay olib tashlandi (frontend commitiga qarang).
+//
+// Endi server ishga tushganda webhook AVTOMATIK ro'yxatdan o'tadi.
+async function setupBotWebhook() {
+  if (!BOT_TOKEN) {
+    console.warn('[Bot] ⚠️  TELEGRAM_BOT_TOKEN yo\'q — bot ishlamaydi. .env ga qo\'shing.');
+    return;
+  }
+
+  const appUrl = process.env.APP_URL;
+  if (!appUrl || !appUrl.startsWith('https://')) {
+    console.warn('[Bot] ⚠️  APP_URL yo\'q yoki https:// bilan boshlanmaydi — webhook o\'rnatilmadi.');
+    console.warn('[Bot]    Telegram webhook uchun HTTPS majburiy. Lokal ishlab chiqishda');
+    console.warn('[Bot]    ngrok/cloudflared kabi tunnel ishlatib, APP_URL ga uning manzilini yozing.');
+    return;
+  }
+
+  const webhookUrl = `${appUrl.replace(/\/+$/, '')}/webhook`;
+
+  // Bot haqiqatan ishlayotganini tekshiramiz (token to'g'rimi?)
+  const me = await tgApi('getMe', {});
+  if (!me.ok) {
+    console.error(`[Bot] ❌ Bot tokeni yaroqsiz: ${me.description || 'noma\'lum xatolik'}`);
+    return;
+  }
+  console.log(`[Bot] ✅ Bot ulandi: @${me.result.username} (${me.result.first_name})`);
+
+  // Bot username'ini bazaga yozamiz — `/api/verify/start` deep link uchun kerak
+  try {
+    const current = Settings.get();
+    if (current.botUsername !== me.result.username) {
+      Settings.update({ botUsername: me.result.username, telegramBotUsername: me.result.username });
+      console.log(`[Bot] Bot username sozlamalarga yozildi: @${me.result.username}`);
+    }
+  } catch (err) {
+    console.error('[Bot] Username saqlanmadi:', err);
+  }
+
+  // Mavjud webhook allaqachon to'g'ri bo'lsa qayta o'rnatmaymiz
+  const info = await tgApi('getWebhookInfo', {});
+  if (info.ok && info.result?.url === webhookUrl) {
+    console.log(`[Bot] ✅ Webhook allaqachon to'g'ri: ${webhookUrl}`);
+    if (info.result.last_error_message) {
+      console.warn(`[Bot] ⚠️  Telegram oxirgi xatoni bildirdi: ${info.result.last_error_message}`);
+    }
+    return;
+  }
+
+  const result = await tgApi('setWebhook', {
+    url: webhookUrl,
+    secret_token: WEBHOOK_SECRET,
+    // `message` — kontakt va buyruqlar uchun; `callback_query` — inline tugmalar
+    allowed_updates: ['message', 'callback_query'],
+    drop_pending_updates: true,
+  });
+
+  if (result.ok) {
+    console.log(`[Bot] ✅ Webhook o'rnatildi: ${webhookUrl}`);
+  } else {
+    console.error(`[Bot] ❌ Webhook o'rnatilmadi: ${result.description || 'noma\'lum xatolik'}`);
+  }
+}
+
+// Boot'da fon rejimida — serverning ishga tushishini bloklamaydi
+setupBotWebhook().catch((err) => console.error('[Bot] Webhook sozlashda xatolik:', err));
+
 
 // ─── Kutilmagan xatolarni ushlash ───────────────────────────────────────────
 // ESKI KOD: bu handlerlar YO'Q edi. Node 22'da ushlanmagan promise rejection

@@ -214,6 +214,28 @@ db.exec(`
     created_at TEXT NOT NULL
   );
 
+  -- ═══════════════════════════════════════════════════════════════════
+  --  TELEGRAM BOT ORQALI TASDIQLASH (telefon tasdiqlash o'rniga)
+  -- ═══════════════════════════════════════════════════════════════════
+  -- Foydalanuvchi saytni Telegram Mini App tashqarisida (oddiy brauzerda)
+  -- ochsa, server uning KIM ekanini bilmaydi. Shu sababli qisqa muddatli
+  -- bir martalik kod ishlatiladi:
+  --   1) sayt POST /api/verify/start -> kod + deep link oladi
+  --   2) foydalanuvchi https://t.me/BOT?start=KOD manzilini ochadi
+  --   3) bot kontakt so'raydi, foydalanuvchi kontaktini yuboradi
+  --   4) server kontaktni tekshirib, kodni shu Telegram ID ga bog'laydi
+  --   5) sayt GET /api/verify/status?code=KOD orqali JWT va profilni oladi
+  CREATE TABLE IF NOT EXISTS verification_codes (
+    code TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | awaiting_contact | verified | expired
+    telegram_id TEXT,                        -- kod bog'langan Telegram ID
+    chat_id TEXT,                            -- bot suhbati (kontakt so'rash uchun)
+    phone TEXT,
+    created_at TEXT NOT NULL,
+    verified_at TEXT,
+    claimed_at TEXT                          -- sayt tokenni olib ketgan vaqt
+  );
+
   CREATE TABLE IF NOT EXISTS banned_devices (
     device_token TEXT PRIMARY KEY,
     banned_at TEXT NOT NULL
@@ -236,6 +258,23 @@ if (!process.env.SUPER_ADMIN_ID) {
   console.warn('[SECURITY WARNING] SUPER_ADMIN_ID .env faylda topilmadi! Standart qiymat vaqtincha ishlatilmoqda — buni albatta o\'zgartiring.');
 }
 const SUPER_ADMIN_ID = process.env.SUPER_ADMIN_ID || '891846690';
+
+/**
+ * `.env` dagi `ADMIN_IDS` (vergul bilan ajratilgan Telegram ID lar).
+ *
+ * Bu ro'yxatdagi ID egasi ro'yxatdan o'tishi bilanoq AVTOMATIK admin bo'ladi
+ * (qarang `Admins.isAdmin` va `Admins.ensureEnvAdmin`). Ilgari bu qiymat
+ * faqat botdagi tasdiqlash buyruqlari uchun o'qilardi, web admin paneli esa
+ * uni butunlay e'tiborsiz qoldirardi.
+ */
+const ENV_ADMIN_IDS = String(process.env.ADMIN_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+if (ENV_ADMIN_IDS.length > 0) {
+  console.log(`[Admin] .env ADMIN_IDS: ${ENV_ADMIN_IDS.join(', ')}`);
+}
 
 export const Users = {
   getById(id) {
@@ -294,6 +333,72 @@ export const Users = {
 
   resetHwid(userId) {
     db.prepare('UPDATE users SET hwid_binding = NULL, device_token = NULL WHERE id = ?').run(userId);
+  },
+
+  /**
+   * Telegram profil ma'lumotlarini bazaga sinxronlaydi.
+   *
+   * TALAB: "saytdagi foydalanuvchi ID'si Telegram ID bilan bir xil bo'lsin,
+   * username ham Telegramdagidek bo'lsin — agar foydalanuvchi Telegramda
+   * username'ini o'zgartirsa, saytdagi ham avtomatik o'zgarishi kerak".
+   *
+   * Shu funksiya foydalanuvchi bot bilan har qanday aloqada bo'lganda
+   * (webhook) va Mini App orqali kirganda (`/api/auth/verify`) chaqiriladi —
+   * ya'ni username har safar Telegram'dagi HAQIQIY qiymatga tenglashtiriladi.
+   *
+   * `id` — HAR DOIM Telegram ID (`from.id`), boshqa hech qanday ID sxemasi
+   * ishlatilmaydi.
+   */
+  syncTelegramProfile(tgUser) {
+    const id = String(tgUser.id);
+    const existing = this.getById(id);
+    const now = new Date().toISOString();
+
+    // Telegram'da username o'chirilgan bo'lishi mumkin (undefined) — bunda
+    // bazadagi qiymatni ham bo'shatamiz, aks holda eski username "muzlab"
+    // qolardi va sayt Telegram bilan mos kelmasdi.
+    const username = tgUser.username != null ? String(tgUser.username) : '';
+
+    if (!existing) {
+      const isAdmin = Admins.isAdmin(id);
+      const created = {
+        id,
+        firstName: tgUser.first_name || `Foydalanuvchi #${id}`,
+        lastName: tgUser.last_name || '',
+        username,
+        isVip: isAdmin,
+        vipExpiresAt: isAdmin ? new Date(Date.now() + 365 * 86400000).toISOString() : null,
+        purchasedContentIds: [],
+        accessTokens: 0,
+        createdAt: now,
+        lastLoginAt: now,
+      };
+      this.upsert(created);
+      return this.getById(id);
+    }
+
+    existing.firstName = tgUser.first_name || existing.firstName;
+    existing.lastName = tgUser.last_name != null ? tgUser.last_name : existing.lastName;
+    existing.username = username;
+    existing.lastLoginAt = now;
+    this.upsert(existing);
+    return this.getById(id);
+  },
+
+  /**
+   * Telegram kontakti orqali foydalanuvchini tasdiqlaydi (telefon
+   * tasdiqlash o'rniga). `isPhoneVerified` SERVER tomonidan boshqariladigan
+   * maydon — shuning uchun uni faqat shu yerda, botdan kelgan HAQIQIY
+   * kontakt asosida o'rnatamiz.
+   */
+  verifyByContact(userId, phone) {
+    const id = String(userId);
+    const user = this.getById(id);
+    if (!user) return null;
+    user.phone = phone || user.phone || null;
+    user.isPhoneVerified = true;
+    this.upsert(user);
+    return this.getById(id);
   },
 
   expireSubscriptions() {
@@ -880,13 +985,64 @@ export const Admins = {
     return true;
   },
 
+  /**
+   * Foydalanuvchi admin ekanini aniqlaydi.
+   *
+   * ═══ TUZATILGAN XATO: .env ADMIN_IDS HISOBGA OLINMASDI ═══
+   * ESKI KOD faqat `SUPER_ADMIN_ID` va `appointed_admins` jadvalini
+   * tekshirardi. Ya'ni `.env` faylga `ADMIN_IDS=123,456` deb yozish web
+   * admin paneli uchun HECH NARSA BERMASDI — u faqat botdagi
+   * `/approve_` buyruqlari uchun ishlardi (server.js). Natijada
+   * ".env dagi ID egasi ro'yxatdan o'tsa avtomatik admin bo'lsin" degan
+   * talab bajarilmasdi.
+   *
+   * Endi 3 ta manba tekshiriladi:
+   *   1) `SUPER_ADMIN_ID` (.env)
+   *   2) `ADMIN_IDS` (.env, vergul bilan)
+   *   3) `appointed_admins` jadvali (admin panel orqali tayinlanganlar)
+   */
   isAdmin(userId) {
-    if (userId === SUPER_ADMIN_ID) return true;
-    return Boolean(db.prepare('SELECT 1 FROM appointed_admins WHERE id = ?').get(userId));
+    const id = String(userId || '').trim();
+    if (!id) return false;
+    if (id === SUPER_ADMIN_ID) return true;
+    if (ENV_ADMIN_IDS.includes(id)) return true;
+    return Boolean(db.prepare('SELECT 1 FROM appointed_admins WHERE id = ?').get(id));
   },
 
   isSuperAdmin(userId) {
-    return userId === SUPER_ADMIN_ID;
+    return String(userId || '').trim() === SUPER_ADMIN_ID;
+  },
+
+  /**
+   * `.env` da ko'rsatilgan adminni `appointed_admins` jadvaliga yozadi.
+   *
+   * Bu ikki narsa uchun kerak:
+   *   - admin panelidagi "Adminlar" ro'yxatida u ham ko'rinsin;
+   *   - `Admins.getAll()`/`getPermissions()` unga to'liq huquq qaytarsin.
+   * Jadvaldagi yozuv `.env` ni ALMASHTIRMAYDI — `.env` baribir birlamchi
+   * manba bo'lib qoladi (yuqoridagi `isAdmin`).
+   */
+  ensureEnvAdmin(userId, profile = {}) {
+    const id = String(userId || '').trim();
+    if (!id) return false;
+
+    const isSuper = id === SUPER_ADMIN_ID;
+    if (!isSuper && !ENV_ADMIN_IDS.includes(id)) return false;
+
+    const existing = db.prepare('SELECT 1 FROM appointed_admins WHERE id = ?').get(id);
+    if (existing) return false; // allaqachon bor — qayta yozmaymiz
+
+    this.upsert({
+      id,
+      name: profile.name || `Admin #${id}`,
+      username: profile.username || '',
+      roleTitle: isSuper ? 'Bosh Admin' : 'Admin',
+      isSuperAdmin: isSuper,
+      permissions: fullPermissions(),
+      appointedBy: 'env',
+    });
+    console.log(`[Admin] .env da ko'rsatilgan admin avtomatik ro'yxatga olindi: ${id}`);
+    return true;
   },
 
   getPermissions(userId) {
@@ -1018,6 +1174,88 @@ export const TokenUnlock = {
     }
     Users.upsert(user);
     return { success: true, message: `1 ta Token sarflandi. "${title || contentId}" ochildi!`, user };
+  },
+};
+
+// ══════════════════════════════════════════════════════════════════
+//  TELEGRAM BOT ORQALI TASDIQLASH KODLARI
+// ══════════════════════════════════════════════════════════════════
+//
+// Sayt Telegram Mini App TASHQARISIDA (oddiy brauzerda) ochilganda server
+// tashrifchi kim ekanini bilmaydi — `initData` yo'q. Shu sababli bir
+// martalik kod ishlatiladi va u brauzer sessiyasini Telegram foydalanuvchisi
+// bilan bog'laydi.
+
+const VERIFY_CODE_TTL_MS = 15 * 60 * 1000; // 15 daqiqa
+
+export const VerificationCodes = {
+  /** Yangi kod yaratadi (sayt `POST /api/verify/start` da chaqiradi). */
+  create(code) {
+    db.prepare(`
+      INSERT INTO verification_codes (code, status, created_at)
+      VALUES (?, 'pending', ?)
+    `).run(code, new Date().toISOString());
+    return this.getByCode(code);
+  },
+
+  getByCode(code) {
+    if (!code) return null;
+    return db.prepare('SELECT * FROM verification_codes WHERE code = ?').get(String(code)) || null;
+  },
+
+  /** Muddati o'tganmi? */
+  isExpired(row) {
+    if (!row) return true;
+    return Date.now() - new Date(row.created_at).getTime() > VERIFY_CODE_TTL_MS;
+  },
+
+  /**
+   * Bot `/start <kod>` ni qabul qilganda: kodni suhbatga bog'laymiz va
+   * kontakt kutish holatiga o'tkazamiz.
+   */
+  attachChat(code, telegramId, chatId) {
+    const row = this.getByCode(code);
+    if (!row || row.status === 'verified' || this.isExpired(row)) return null;
+    db.prepare(`
+      UPDATE verification_codes
+      SET status = 'awaiting_contact', telegram_id = ?, chat_id = ?
+      WHERE code = ?
+    `).run(String(telegramId), String(chatId), String(code));
+    return this.getByCode(code);
+  },
+
+  /** Shu suhbat uchun kontakt kutayotgan eng oxirgi kodni topadi. */
+  findAwaitingByChat(chatId) {
+    return db.prepare(`
+      SELECT * FROM verification_codes
+      WHERE chat_id = ? AND status = 'awaiting_contact'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(String(chatId)) || null;
+  },
+
+  /** Kontakt tasdiqlandi. */
+  markVerified(code, telegramId, phone) {
+    db.prepare(`
+      UPDATE verification_codes
+      SET status = 'verified', telegram_id = ?, phone = ?, verified_at = ?
+      WHERE code = ?
+    `).run(String(telegramId), phone || null, new Date().toISOString(), String(code));
+    return this.getByCode(code);
+  },
+
+  /**
+   * Sayt tokenni olib ketdi. Kod BIR MARTALIK: ikkinchi so'rov token
+   * bermaydi, shunda kod boshqa odam qo'liga tushsa ham foyda bermaydi.
+   */
+  markClaimed(code) {
+    db.prepare('UPDATE verification_codes SET claimed_at = ? WHERE code = ?')
+      .run(new Date().toISOString(), String(code));
+  },
+
+  /** Eski kodlarni tozalash (boot'da va davriy ravishda). */
+  cleanupExpired() {
+    const cutoff = new Date(Date.now() - VERIFY_CODE_TTL_MS).toISOString();
+    return db.prepare('DELETE FROM verification_codes WHERE created_at < ?').run(cutoff);
   },
 };
 
