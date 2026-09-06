@@ -843,7 +843,18 @@ export default function App() {
         onVerified={(updated) => {
           setUser(updated);
           setIsPhoneModalOpen(false);
-          refreshData();
+
+          // MUHIM: shu yerda faqat `refreshData()` chaqirish YETARLI EMAS.
+          // `refreshData` localStorage keshidan o'qiydi, adminlik holati esa
+          // `syncEntitlementsFromServer()` ichida (server JWT `isAdmin`
+          // claim'idan) belgilanadi. Ya'ni faqat `refreshData()` bo'lsa,
+          // bot orqali tasdiqlangan admin panel paydo bo'lishini 60
+          // sekundlik davriy sinxronizatsiyaga qadar kutishi kerak edi.
+          //
+          // Endi tasdiqlangandan keyin darhol sinxronlaymiz: entitlement,
+          // adminlik va kontent ro'yxati bir zumda aktual bo'ladi.
+          void syncEntitlementsFromServer().then(() => refreshData());
+          void syncContentFromServer();
         }}
       />
 
