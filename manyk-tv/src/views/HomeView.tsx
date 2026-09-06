@@ -4,7 +4,7 @@ import { ContentItem, UserProfile, SystemSettings, CatalogCategory } from '../ty
 import { HeroSlider } from '../components/HeroSlider';
 import { ContentCard } from '../components/ContentCard';
 import { DailyCheckInWidget } from '../components/DailyCheckInWidget';
-import { checkHasAccess, useAccessTokenToUnlock } from '../services/storage';
+import { checkHasAccess, spendTokenToUnlock } from '../services/storage';
 
 interface HomeViewProps {
   contents: ContentItem[];
@@ -243,10 +243,18 @@ export const HomeView: React.FC<HomeViewProps> = ({
                                   // Serial bo'lsa, foydalanuvchi qaysi qismni ochishni o'zi tanlashi uchun pleyer ochiladi
                                   onSelectContent(item);
                                 } else {
-                                  const res = useAccessTokenToUnlock(user.id, item.id, item.title);
-                                  if (res.success) {
-                                    onSelectContent(item);
-                                  }
+                                  // Token sarflash endi SERVER tomonida (async).
+                                  // ESKI KOD natijani e'tiborsiz qoldirardi:
+                                  // token tugagan bo'lsa tugma hech nima
+                                  // qilmasdi va foydalanuvchi sababini
+                                  // bilmasdi. Endi xato xabari ko'rsatiladi.
+                                  void spendTokenToUnlock(user.id, item.id, item.title).then((res) => {
+                                    if (res.success) {
+                                      onSelectContent(item);
+                                    } else {
+                                      alert(res.message);
+                                    }
+                                  });
                                 }
                               }}
                               className="py-1.5 px-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-md shadow-amber-600/20 transition flex items-center gap-1"

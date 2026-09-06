@@ -41,7 +41,7 @@ import {
   getStoredCurrentUser,
   getStoredReceipts,
   isUserAdmin,
-  checkAndExpireSubscriptions,
+  syncEntitlementsFromServer,
   switchUserProfile,
   saveStoredCurrentUser,
   saveStoredUser,
@@ -52,7 +52,7 @@ import {
   getOrCreateDeviceFingerprint,
   initSecurityGuards,
 } from './services/deviceSecurity';
-import { getAuthHeaders } from './services/authToken';
+import { getAuthHeaders, getBackendAuthToken } from './services/authToken';
 import {
   ShieldAlert,
   AlertTriangle,
@@ -286,44 +286,134 @@ export default function App() {
 
     const pollInterval = setInterval(checkReceiptsStatus, 3000);
 
-    // 3. Connect to Backend SSE for real-time Telegram Bot approval sync
+    // ═══ 3. BACKEND SSE ULANISHI — QAYTA YOZILDI ═══
+    //
+    // ESKI KODDA 4 TA XATO:
+    //
+    //  1) `?userId=${currentUser.id}` — server bu qiymatga ISHONARDI, ya'ni
+    //     istalgan odam boshqa foydalanuvchi nomidan ulanib, uning to'lov
+    //     xabarlarini olishi mumkin edi. Backend endi JWT talab qiladi va
+    //     userId ni TOKEN ichidan oladi (`?token=`).
+    //
+    //  2) SSE `payment_decision` kelganda klient O'ZI `reviewReceipt` ni
+    //     chaqirib, VIP ni LOKAL ravishda berardi. 3 sekundlik poller ham
+    //     shu holatga reaksiya qilardi — natijada bir qaror IKKI MARTA
+    //     qo'llanib, VIP muddati ikki barobar uzayishi mumkin edi.
+    //     Endi klient hech qanday huquq BERMAYDI: shunchaki serverdan
+    //     avtoritiv entitlement'ni qayta so'raydi.
+    //
+    //  3) `onerror` yo'q edi va `try/catch` async ulanish xatosini
+    //     ushlamaydi — ya'ni `console.warn("Backend ulanishi yo'q")` hech
+    //     qachon bajarilmaydigan o'lik kod edi, uzilgan ulanish esa qayta
+    //     tiklanmasdi.
+    //
+    //  4) `catch (err) {}` — bo'sh blok barcha xatolarni izsiz yutardi.
     let eventSource: EventSource | null = null;
-    try {
-      const currentUser = getStoredCurrentUser();
-      eventSource = new EventSource(`/api/events?userId=${currentUser.id}`);
-      
-      eventSource.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === 'payment_decision') {
-            const receipts = getStoredReceipts();
-            const rcpt = receipts.find(r => r.id === data.receiptId);
-            if (rcpt && rcpt.status === 'pending') {
-              // Update local storage directly via imported functions
-              import('./services/storage').then(({ reviewReceipt }) => {
-                reviewReceipt(data.receiptId, data.adminId || 'bot_admin', data.decision);
-              });
-            }
-          } else if (data.type === 'content_updated') {
-            // Admin biror kino/serial qo'shsa, tahrirlasa yoki o'chirsa,
-            // server SSE orqali barcha ochiq ilovalarga xabar beradi —
-            // shu yerda kontent ro'yxatini serverdan qayta so'rab,
-            // hammaning ekranida bir xil (yangi) ro'yxat ko'rsatiladi.
-            syncContentFromServer();
-          }
-        } catch (err) {}
+    let sseRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let sseAttempt = 0;
+    let sseClosed = false;
+
+    const handleSseMessage = (e: MessageEvent) => {
+      let data: { type?: string; receiptId?: string; decision?: string };
+      try {
+        data = JSON.parse(e.data);
+      } catch (err) {
+        console.warn('[SSE] Xabarni o\'qib bo\'lmadi:', err);
+        return;
+      }
+
+      if (data.type === 'payment_decision') {
+        // Server allaqachon VIP/xaridni bergan — biz faqat AVTORITIV
+        // holatni tortib olamiz va foydalanuvchiga xabar ko'rsatamiz.
+        void syncEntitlementsFromServer().then(() => refreshData());
+
+        setPaymentToast({
+          id: String(Date.now()),
+          type: data.decision === 'approved' ? 'success' : 'error',
+          title: data.decision === 'approved' ? "🎉 To'lovingiz tasdiqlandi!" : "To'lov cheki rad etildi",
+          message:
+            data.decision === 'approved'
+              ? 'Obuna faollashtirildi! Barcha serial va filmlar ochildi.'
+              : "Yuborilgan to'lov chekingiz admin tomonidan qabul qilinmadi.",
+        });
+      } else if (data.type === 'content_updated') {
+        // Admin kino/serial qo'shsa, tahrirlasa yoki o'chirsa — ro'yxatni
+        // serverdan qayta so'rab, hammaning ekranida bir xil holat bo'ladi.
+        void syncContentFromServer();
+      }
+    };
+
+    const connectSse = async () => {
+      if (sseClosed) return;
+
+      // SSE header yubora olmaydi, shuning uchun JWT query parametrida.
+      const token = await getBackendAuthToken();
+      if (!token) {
+        // Telegram tashqarisida token bo'lmaydi — real-time yangilanish
+        // ishlamaydi, lekin ilova 3 sekundlik poller bilan ishlashda davom
+        // etadi. Qayta urinishning ma'nosi yo'q.
+        console.info('[SSE] Token yo\'q — real-time kanal o\'chirilgan.');
+        return;
+      }
+      if (sseClosed) return;
+
+      const es = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
+      eventSource = es;
+
+      es.onmessage = handleSseMessage;
+
+      es.onopen = () => {
+        sseAttempt = 0; // muvaffaqiyatli ulanishdan keyin kechikish tiklanadi
       };
-    } catch (err) {
-      console.warn("Backend ulanishi yo'q");
-    }
+
+      es.onerror = () => {
+        es.close();
+        if (sseClosed) return;
+
+        // Eksponensial kechikish bilan qayta ulanish (maks. 30 sekund).
+        // Bu ayni paytda backend'dagi rate-limit'ni ham urib yubormaydi.
+        sseAttempt += 1;
+        const delay = Math.min(1000 * 2 ** (sseAttempt - 1), 30000);
+        console.warn(`[SSE] Ulanish uzildi — ${delay / 1000}s dan keyin qayta urinamiz (${sseAttempt})`);
+        sseRetryTimer = setTimeout(() => {
+          void connectSse();
+        }, delay);
+      };
+    };
+
+    void connectSse();
 
     // Periodic automatic VIP subscription expiration check (auto-revocation)
-    const expiryInterval = setInterval(() => {
-      const changed = checkAndExpireSubscriptions();
-      if (changed) {
-        refreshData();
-      }
-    }, 10000);
+    // ═══ OBUNA MUDDATINI TEKSHIRISH ═══
+    // Muddati o'tgan obunani YOPISH endi serverning ishi
+    // (`Users.expireSubscriptions` boot'da va har soatda). Klient faqat
+    // avtoritiv holatni davriy ravishda tortib oladi — shunda bot orqali
+    // tasdiqlangan to'lov yoki tugagan obuna ekranda ham ko'rinadi.
+    // Interval 10s dan 60s ga oshirildi: ilgari har 10 sekundda `user`
+    // obyekti yangilanib, `checkAccessSecurity` (canvas + WebGL + AudioContext
+    // yaratadigan barmoq izi) qayta hisoblanardi.
+    const entitlementInterval = setInterval(() => {
+      void syncEntitlementsFromServer().then((ent) => {
+        if (ent) refreshData();
+      });
+    }, 60000);
+
+    // Ilova ochilganda darhol bir marta
+    void syncEntitlementsFromServer().then((ent) => {
+      if (ent) refreshData();
+    });
+
+    // Kesh yozilmasa (masalan xotira to'lgan) foydalanuvchini ogohlantiramiz
+    const handleStorageError = (e: Event) => {
+      const detail = (e as CustomEvent<{ message?: string }>).detail;
+      setPaymentToast({
+        id: String(Date.now()),
+        type: 'error',
+        title: 'Qurilma xotirasi',
+        message: detail?.message || "Ma'lumotni qurilmada saqlab bo'lmadi.",
+      });
+    };
+    window.addEventListener('manyak_storage_error', handleStorageError);
 
     // Initial loading state with branded MANYAK TV skeleton
     const initialTimer = setTimeout(() => {
@@ -334,11 +424,19 @@ export default function App() {
       cleanupGuards();
       clearTimeout(initialTimer);
       if (timeoutId) clearTimeout(timeoutId);
-      clearInterval(expiryInterval);
+      clearInterval(entitlementInterval);
       clearInterval(pollInterval);
+
+      // SSE ni to'liq to'xtatamiz: qayta ulanish taymerini ham bekor qilish
+      // kerak, aks holda komponent yopilgandan keyin ham yangi ulanish
+      // yaratilib, unmount qilingan komponentda setState chaqirilardi.
+      sseClosed = true;
+      if (sseRetryTimer) clearTimeout(sseRetryTimer);
       if (eventSource) eventSource.close();
+
       window.removeEventListener('manyak_storage_update', handleStorageUpdate);
       window.removeEventListener('manyak_payment_status_update', handlePaymentStatusUpdate);
+      window.removeEventListener('manyak_storage_error', handleStorageError);
     };
   }, [refreshData]);
 

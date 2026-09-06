@@ -22,7 +22,17 @@ import {
 import {
   validatePromoCode,
   submitPaymentReceipt,
+  uploadFileToServer,
 } from '../services/storage';
+
+/**
+ * Chek rasmi uchun maksimal hajm.
+ * Server `/api/upload` katta fayllarni ham qabul qiladi, lekin chek
+ * skrinshoti uchun 8 MB dan katta fayl kerak emas — foydalanuvchini
+ * uzoq kutishdan va tarmoq trafigidan saqlaymiz.
+ */
+const MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
+const ALLOWED_RECEIPT_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
 
 interface PaymentModalProps {
   isOpen: boolean;
@@ -65,13 +75,29 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [appliedPromo, setAppliedPromo] = useState<string>('');
 
   // Receipt upload form
+  // `receiptImage` endi base64 "data:" satri EMAS, balki serverdagi doimiy
+  // manzil (masalan "/uploads/1788...ab12.jpg").
   const [receiptImage, setReceiptImage] = useState<string>('');
+  // Mahalliy ko'rinish (preview) — faqat ekranda ko'rsatish uchun, saqlanmaydi.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [receiptNotes, setReceiptNotes] = useState('');
   const [copiedCard, setCopiedCard] = useState(false);
   const [copiedAmount, setCopiedAmount] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionSuccess, setSubmissionSuccess] = useState<string | null>(null);
   const [isApprovedLive, setIsApprovedLive] = useState(false);
+
+  // `URL.createObjectURL` bilan yaratilgan manzillar brauzer xotirasida
+  // ushlab turiladi — komponent yopilganda yoki rasm o'zgarganda bo'shatish
+  // kerak, aks holda xotira oqadi (memory leak).
+  useEffect(() => {
+    if (!previewUrl) return;
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
 
   // Reset or initialize on open
   useEffect(() => {
@@ -173,34 +199,108 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setTimeout(() => setCopiedAmount(false), 2000);
   };
 
-  // Image upload
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  // ═══ CHEK RASMINI YUKLASH — TO'LIQ QAYTA YOZILDI ═══
+  //
+  // ESKI KOD:
+  //   const reader = new FileReader();
+  //   reader.onload = () => { ...setReceiptImage(reader.result) };
+  //   reader.readAsDataURL(file);
+  //
+  // Bu rasmni base64 "data:" satriga aylantirib, uni chek yozuvi ichida
+  // localStorage'ga saqlardi. Natijada 3 ta jiddiy muammo bor edi:
+  //
+  //  1) FOYDALANUVCHI TO'LAGAN, LEKIN CHEK YO'QOLGAN. Telefon kamerasidagi
+  //     3-5 MB rasm base64'da ~33% kattalashadi va localStorage'ning ~5 MB
+  //     kvotasini yorib yuboradi. `setItem` esa xatoni faqat `console.error`
+  //     qilardi — ya'ni yozuv saqlanmagan holda UI "Chek Adminga Yuborildi"
+  //     deb ko'rsatardi.
+  //  2) ADMIN CHEKNI KO'RMASDI. telegramBot.ts `photoUrl.startsWith('http')`
+  //     tekshiruvidan o'tmagan "data:" URL'ni rasm sifatida yubormaydi —
+  //     adminга faqat matn borardi.
+  //  3) Rasm faqat shu qurilmada qolardi (boshqa admin ko'ra olmaydi).
+  //
+  // ENDI: fayl haqiqiy `/api/upload` orqali server diskiga yoziladi va
+  // qaytgan doimiy `/uploads/...` manzili saqlanadi. Hajm/tur tekshiriladi,
+  // yuklash jarayoni foydalanuvchiga ko'rsatiladi, xato esa YASHIRILMAYDI.
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setReceiptImage(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
+    setUploadError(null);
+
+    // Tur tekshiruvi (`accept` atributi faqat maslahat — chetlab o'tish oson)
+    if (file.type && !ALLOWED_RECEIPT_TYPES.includes(file.type)) {
+      setUploadError('Faqat rasm fayli yuklang (JPG, PNG yoki WEBP).');
+      input.value = '';
+      return;
+    }
+
+    if (file.size > MAX_RECEIPT_BYTES) {
+      const mb = (file.size / (1024 * 1024)).toFixed(1);
+      setUploadError(`Rasm juda katta (${mb} MB). Maksimal 8 MB — iltimos kichikroq skrinshot yuklang.`);
+      input.value = '';
+      return;
+    }
+
+    // Yuklashdan oldin darhol mahalliy ko'rinish (preview) ko'rsatamiz.
+    // `URL.createObjectURL` faqat KO'RSATISH uchun — saqlanmaydi, shuning
+    // uchun uning sessiyaga bog'liqligi muammo emas. Effect'da tozalanadi.
+    const localPreview = URL.createObjectURL(file);
+    setPreviewUrl(localPreview);
+
+    setIsUploading(true);
+    setUploadProgress(0);
+    try {
+      const url = await uploadFileToServer(file, (percent) => {
+        setUploadProgress(Math.round(percent));
+      });
+      // Serverdagi DOIMIY manzil — aynan shu chek yozuviga saqlanadi
+      setReceiptImage(url);
+    } catch (err) {
+      setReceiptImage('');
+      setUploadError(
+        err instanceof Error
+          ? `Chekni yuklab bo'lmadi: ${err.message}`
+          : "Chekni yuklab bo'lmadi. Internetni tekshirib, qayta urinib ko'ring."
+      );
+    } finally {
+      setIsUploading(false);
+      // Bir xil faylni qayta tanlash ham `change` hodisasini chiqarishi uchun
+      input.value = '';
+    }
   };
 
-  // Submit receipt to admin queue & telegram bot
-  const handleSubmitReceipt = (e: React.FormEvent) => {
+  // ═══ CHEKNI YUBORISH — QAYTA YOZILDI ═══
+  //
+  // ESKI KOD `setTimeout(..., 600)` ichida `submitPaymentReceipt(...)` ni
+  // chaqirib, natijasini TEKSHIRMASDAN darhol "muvaffaqiyat" xabarini
+  // ko'rsatardi. Ya'ni server so'rovi 401/500 bilan yiqilsa ham foydalanuvchi
+  // "Chek Adminga Yuborildi" degan yozuvni ko'rardi — pul to'langan, chek esa
+  // hech qayerda yo'q.
+  // Endi: soxta kechikish olib tashlandi, natija haqiqatan kutiladi va
+  // xatolik foydalanuvchiga ko'rsatiladi.
+  const handleSubmitReceipt = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmitError(null);
+
+    if (isUploading) {
+      setSubmitError("Chek rasmi hali yuklanmoqda — biroz kutib turing.");
+      return;
+    }
     if (!receiptImage) {
-      alert("Iltimos, to'lov chekining skrinshot rasmini yuklang");
+      setSubmitError("Iltimos, to'lov chekining skrinshot rasmini yuklang.");
       return;
     }
 
     setIsSubmitting(true);
-    setTimeout(() => {
-      submitPaymentReceipt({
+    try {
+      await submitPaymentReceipt({
         userId: user.id,
         userName: `${user.firstName} ${user.lastName || ''}`.trim() || `Foydalanuvchi #${user.id}`,
-        userPhone: user.phone,
+        // `?? undefined` emas — server `?? null` bilan normallashtiradi,
+        // lekin bo'sh satr yubormaslik uchun aniq qilamiz
+        userPhone: user.phone || undefined,
         type: purchaseMode === 'content' ? 'single_content' : 'vip_subscription',
         planId: purchaseMode === 'vip' ? selectedPlanId : undefined,
         planName: purchaseMode === 'vip' ? targetTitle : undefined,
@@ -208,17 +308,27 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         contentTitle: purchaseMode === 'content' && activeContent ? activeContent.title : undefined,
         amount: finalPrice,
         discountApplied: discountAmount,
-        promoCodeUsed: appliedPromo || (vipBonusDiscount > 0 ? '7_KUNLIK_VIP_10%' : undefined),
+        // ESKI KOD: promokod kiritilmagan bo'lsa ham `'7_KUNLIK_VIP_10%'`
+        // degan SOXTA promokod nomi yozilardi. Endi bu maydon faqat
+        // haqiqatan kiritilgan promokod uchun to'ldiriladi.
+        promoCodeUsed: appliedPromo || undefined,
         receiptImageUrl: receiptImage,
         notes: receiptNotes || undefined,
       });
 
       const botName = (settings.botUsername || 'Manyaktvbot').replace('@', '');
-      setIsSubmitting(false);
       setSubmissionSuccess(
         `To'lov chekingiz qabul qilindi! Tasdiqlash buyrug'i @${botName} botiga va admin panelga yuborildi. Admin tasdiqlashi bilan obuna ilovada avtomatik ochiladi.`
       );
-    }, 600);
+    } catch (err) {
+      setSubmitError(
+        err instanceof Error
+          ? `Chekni yuborib bo'lmadi: ${err.message}`
+          : "Chekni yuborib bo'lmadi. Internetni tekshirib, qayta urinib ko'ring."
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -617,18 +727,36 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     type="file"
                     accept="image/*"
                     onChange={handleFileUpload}
-                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                    disabled={isUploading}
+                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full disabled:cursor-wait"
                   />
-                  {receiptImage ? (
+
+                  {/* Yuklanmoqda — haqiqiy progress (soxta emas) */}
+                  {isUploading ? (
+                    <div className="flex flex-col items-center justify-center py-2 gap-2">
+                      <div className="w-full max-w-[220px] h-2 bg-zinc-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-red-600 to-amber-500 transition-all duration-200"
+                          style={{ width: `${uploadProgress}%` }}
+                        />
+                      </div>
+                      <span className="text-xs font-bold text-zinc-200">
+                        Chek serverga yuklanmoqda… {uploadProgress}%
+                      </span>
+                      <span className="text-[10px] text-zinc-500">
+                        Sahifani yopmang
+                      </span>
+                    </div>
+                  ) : receiptImage ? (
                     <div className="flex items-center justify-center gap-3">
                       <img
-                        src={receiptImage}
+                        src={previewUrl || receiptImage}
                         alt="Chek"
                         className="w-16 h-16 object-cover rounded-lg border border-zinc-700"
                       />
                       <div className="text-left">
                         <span className="text-xs text-emerald-400 font-bold block">
-                          Chek muvaffaqiyatli tanlandi!
+                          Chek serverga saqlandi ✓
                         </span>
                         <span className="text-[10px] text-zinc-400">
                           Boshqa rasm tanlash uchun bosing
@@ -642,11 +770,18 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         Chek skrinshotini bu yerga yuklang
                       </span>
                       <span className="text-[10px] text-zinc-500 mt-0.5">
-                        JPG, PNG yoki Galereyadan tanlang
+                        JPG, PNG yoki WEBP — maksimal 8 MB
                       </span>
                     </div>
                   )}
                 </div>
+
+                {/* Yuklash xatosi — ilgari xatolar jimgina yo'qolardi */}
+                {uploadError && (
+                  <div className="mt-2 p-2.5 rounded-lg bg-red-950/60 border border-red-800/70 text-[11px] text-red-300 leading-snug">
+                    {uploadError}
+                  </div>
+                )}
               </div>
 
               {/* Optional Notes */}
@@ -663,9 +798,17 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 />
               </div>
 
+              {/* Yuborish xatosi — ilgari xato bo'lsa ham "muvaffaqiyat" ko'rsatilardi */}
+              {submitError && (
+                <div className="p-3 rounded-xl bg-red-950/60 border border-red-800/70 text-xs text-red-300 leading-snug">
+                  <strong className="block font-bold text-red-200 mb-0.5">Yuborilmadi</strong>
+                  {submitError}
+                </div>
+              )}
+
               <button
                 type="submit"
-                disabled={isSubmitting || !receiptImage}
+                disabled={isSubmitting || isUploading || !receiptImage}
                 className="w-full py-3.5 px-4 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:hover:bg-red-600 active:scale-98 font-bold text-sm text-white shadow-lg shadow-red-600/30 transition flex items-center justify-center gap-2"
               >
                 {isSubmitting ? (

@@ -30,7 +30,7 @@ import {
   notifyReceiptApprovedViaTelegram,
   notifyReceiptRejectedViaTelegram,
 } from './telegramBot';
-import { getAuthHeaders } from './authToken';
+import { getAuthHeaders, invalidateAuthToken } from './authToken';
 
 const KEYS = {
   CONTENT: 'manyak_tv_content_v1',
@@ -57,15 +57,92 @@ function getItem<T>(key: string, fallback: T): T {
   }
 }
 
-function setItem<T>(key: string, value: T, emitEvent = true): void {
+/**
+ * localStorage kvotasi tugaganda ilova ishlashda davom etishi kerak —
+ * shuning uchun kesh yozuvi muvaffaqiyatsiz bo'lsa BUG'IB QOLMAYMIZ, lekin
+ * uni JIMGINA HAM YUTMAYMIZ: `manyak_storage_error` hodisasi yuboriladi va
+ * UI foydalanuvchiga ogohlantirish ko'rsatishi mumkin.
+ *
+ * ESKI KOD faqat `console.error` qilardi. Bu Safari private rejimi va
+ * cheklangan Telegram WebView'larida shunday ko'rinardi: har bir xarid,
+ * token sarflash, sevimli va tarix yozuvi JIMGINA yo'qoladi, UI esa
+ * muvaffaqiyat haqida xabar beradi.
+ *
+ * @returns yozuv muvaffaqiyatli bo'lsa `true`
+ */
+function setItem<T>(key: string, value: T, emitEvent = true): boolean {
+  if (typeof localStorage === 'undefined') return false;
+
   try {
     localStorage.setItem(key, JSON.stringify(value));
     if (emitEvent && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('manyak_storage_update', { detail: { key } }));
     }
+    return true;
   } catch (err) {
-    console.error(`Error saving ${key} to storage:`, err);
+    // Kvota tugashi (QuotaExceededError / NS_ERROR_DOM_QUOTA_REACHED) eng
+    // ko'p uchraydigan holat — bunda eski keshni tozalab qayta urinamiz.
+    const isQuotaError =
+      err instanceof DOMException &&
+      (err.name === 'QuotaExceededError' ||
+        err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+        err.code === 22);
+
+    if (isQuotaError && pruneCacheForSpace(key)) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+        if (emitEvent && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('manyak_storage_update', { detail: { key } }));
+        }
+        return true;
+      } catch {
+        // pastdagi umumiy xato yo'liga tushamiz
+      }
+    }
+
+    console.error(`[Storage] '${key}' saqlanmadi:`, err);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('manyak_storage_error', {
+          detail: {
+            key,
+            isQuotaError,
+            message: isQuotaError
+              ? "Qurilma xotirasi to'lgan — ma'lumot vaqtincha saqlanmadi. Muhim ma'lumotlar serverda saqlangan."
+              : "Ma'lumotni qurilmada saqlab bo'lmadi (brauzer xotirasi cheklangan).",
+          },
+        })
+      );
+    }
+    return false;
   }
+}
+
+/**
+ * Kvota tugaganda joy bo'shatish uchun eng KATTA va eng KAM MUHIM keshni
+ * tozalaydi. Bu ma'lumotlar serverda bor (yoki qayta yaratiladi), shuning
+ * uchun ularni o'chirish xavfsiz.
+ *
+ * @returns joy bo'shatilgan bo'lsa `true`
+ */
+function pruneCacheForSpace(exceptKey: string): boolean {
+  // Muhimlik tartibida: eng avval tashlab yuborilishi mumkin bo'lganlar
+  const disposable = [KEYS.AUDIT_LOGS, KEYS.RECEIPTS, KEYS.HISTORY, KEYS.CONTENT];
+  let freed = false;
+
+  for (const key of disposable) {
+    if (key === exceptKey) continue;
+    try {
+      if (localStorage.getItem(key) !== null) {
+        localStorage.removeItem(key);
+        freed = true;
+        console.warn(`[Storage] Xotira tugadi — '${key}' keshi tozalandi (ma'lumot serverda saqlanadi).`);
+      }
+    } catch {
+      // o'chirish ham ishlamasa — davom etamiz
+    }
+  }
+  return freed;
 }
 
 // 1. CONTENT
@@ -152,6 +229,109 @@ export function syncContentFromServer(): Promise<void> {
     .catch((err) => {
       console.error('Kontentni serverdan olishda xatolik:', err);
     });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ENTITLEMENTS — pul bilan bog'liq holatning YAGONA HAQIQAT MANBASI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// MUAMMO: ilgari VIP holati, sotib olingan kinolar, ochilgan qismlar va
+// tokenlar localStorage'da "haqiqat" sifatida saqlanardi va klient kodning
+// o'zi ularni BERARDI (`reviewReceipt`, `performInstantPurchase`,
+// `useAccessTokenToUnlock`, `claimDailyCheckIn`). Ya'ni brauzer konsolida
+//     localStorage.setItem('manyak_tv_current_user_v1',
+//       JSON.stringify({ ...user, isVip: true, accessTokens: 999 }))
+// deb yozish yetarli edi — hech nima to'lamasdan butun katalog ochilardi.
+//
+// YECHIM: bu maydonlar endi FAQAT serverdan (`GET /api/me/entitlements`)
+// keladi. localStorage esa oddiy KESH: uni tahrirlash foydasiz, chunki
+// keyingi sinxronlashda server qiymati ustidan yozadi.
+
+/** Server tomonidan boshqariladigan maydonlar — klient bularni O'ZI YOZMAYDI. */
+export interface Entitlements {
+  userId: string;
+  isVip: boolean;
+  vipExpiresAt: string | null;
+  purchasedContentIds: string[];
+  unlockedEpisodeIds: string[];
+  accessTokens: number;
+  bonusBalance: number;
+  vipDiscountPercent: number;
+  isPhoneVerified: boolean;
+  isBanned: boolean;
+  isAdmin: boolean;
+  syncedAt: string;
+}
+
+/**
+ * Serverdan avtoritiv entitlement'larni olib, keshlangan profilga yozadi.
+ *
+ * Telegram tashqarisida (JWT yo'q) `null` qaytaradi — bu holda keshdagi
+ * qiymat o'zgarmaydi, lekin u ham hech qanday huquq BERMAYDI, chunki
+ * haqiqiy tekshiruv serverda (`/api/tokens/unlock`, chek tasdiqlash va h.k.).
+ */
+export async function syncEntitlementsFromServer(): Promise<Entitlements | null> {
+  const authHeaders = await getAuthHeaders();
+  if (!authHeaders.Authorization) return null;
+
+  try {
+    const res = await fetch('/api/me/entitlements', { headers: authHeaders });
+    if (!res.ok) {
+      // 401 => token eskirgan yoki secret o'zgargan; keshni tozalab
+      // keyingi so'rovda yangi token olinadi.
+      if (res.status === 401) invalidateAuthToken();
+      console.warn(`[Entitlements] Serverdan olinmadi (status ${res.status})`);
+      return null;
+    }
+    const data = await res.json();
+    if (!data?.ok || !data.entitlements) return null;
+
+    return applyEntitlementsToCache(data.entitlements as Entitlements);
+  } catch (err) {
+    // Oflayn holat — keshdagi qiymat bilan davom etamiz
+    console.warn('[Entitlements] Tarmoq xatosi, keshdagi qiymat ishlatiladi:', err);
+    return null;
+  }
+}
+
+/**
+ * Server qiymatlarini keshlangan `CURRENT_USER` va `USERS` yozuvlariga
+ * yozadi. Faqat entitlement maydonlari yangilanadi — ism, avatar kabi
+ * klient tomonidagi zararsiz maydonlar saqlanadi.
+ */
+function applyEntitlementsToCache(ent: Entitlements): Entitlements {
+  const stored = getItem<UserProfile | null>(KEYS.CURRENT_USER, null);
+  if (!stored || stored.id !== ent.userId) return ent;
+
+  const updated: UserProfile = {
+    ...stored,
+    isVip: ent.isVip,
+    vipExpiresAt: ent.vipExpiresAt || undefined,
+    purchasedContentIds: ent.purchasedContentIds,
+    unlockedEpisodeIds: ent.unlockedEpisodeIds,
+    accessTokens: ent.accessTokens,
+    bonusBalance: ent.bonusBalance,
+    vipDiscountPercent: ent.vipDiscountPercent,
+    isPhoneVerified: ent.isPhoneVerified,
+  };
+
+  setItem(KEYS.CURRENT_USER, updated, false);
+
+  // `USERS` katalogidagi nusxani ham moslashtiramiz, aks holda keyinroq
+  // `{ ...current, ...targetUser }` shaklidagi birlashmalar eski
+  // entitlement qiymatlarini qaytarib qo'yadi.
+  const all = getItem<UserProfile[]>(KEYS.USERS, INITIAL_USERS);
+  const idx = all.findIndex((u) => u.id === ent.userId);
+  if (idx >= 0) {
+    all[idx] = { ...all[idx], ...updated };
+    setItem(KEYS.USERS, all, false);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('manyak_storage_update', { detail: { key: KEYS.CURRENT_USER } }));
+  }
+
+  return ent;
 }
 
 // Fayl (poster rasm yoki video) ni serverga yuklab, doimiy URL qaytaradi.
@@ -1170,14 +1350,24 @@ export function checkHasAccess(user: UserProfile, content: ContentItem, episode?
     if (!user.vipExpiresAt) return true;
 
     const expires = new Date(user.vipExpiresAt).getTime();
-    if (!isNaN(expires)) {
-      if (expires > Date.now()) {
-        return true;
-      } else {
-        // Expired! Automatically revoke VIP
-        user.isVip = false;
-        saveStoredCurrentUser(user);
-      }
+    // ═══ TUZATILDI: BU FUNKSIYA RENDER PAYTIDA localStorage'GA YOZARDI ═══
+    //
+    // ESKI KOD muddat o'tgan bo'lsa shu yerda:
+    //     user.isVip = false;              // <- prop obyektini MUTATSIYA qiladi
+    //     saveStoredCurrentUser(user);     // <- setItem -> 'manyak_storage_update'
+    //                                      //    -> App.refreshData() -> setState
+    //
+    // `checkHasAccess` esa HomeView, SearchView, ShortsFeed va
+    // VideoPlayerModal'ning RENDER TANASIDAN chaqiriladi. Ya'ni render
+    // paytida global holat o'zgartirilib, React'da qayta render zanjiri
+    // (ba'zi hollarda cheksiz tsikl) yuzaga kelardi.
+    //
+    // Endi bu funksiya SOF (pure): faqat o'qiydi va hisoblaydi. Muddati
+    // o'tgan obunani yopish serverning ishi (`Users.expireSubscriptions`
+    // har soatda + `/api/me/entitlements` har so'rovda) va u
+    // `syncEntitlementsFromServer()` orqali keshga tushadi.
+    if (!isNaN(expires) && expires > Date.now()) {
+      return true;
     }
   }
 
@@ -1257,31 +1447,103 @@ export function getStoredReceipts(): PaymentReceipt[] {
   return getItem<PaymentReceipt[]>(KEYS.RECEIPTS, INITIAL_RECEIPTS);
 }
 
-export function submitPaymentReceipt(
-  receiptData: Omit<PaymentReceipt, 'id' | 'createdAt' | 'status'>
-): PaymentReceipt {
-  const all = getStoredReceipts();
-  const newReceipt: PaymentReceipt = {
-    ...receiptData,
-    id: `rcpt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-    status: 'pending',
-    createdAt: new Date().toISOString(),
+/**
+ * Serverdagi chek qatorini (snake_case) frontend tipiga (camelCase) o'giradi.
+ * Backend `receipts` jadvalini xom holda qaytaradi, frontend esa camelCase
+ * `PaymentReceipt` tipini kutadi — mapping bo'lmasa UI maydonlarni o'qiy olmaydi.
+ */
+function receiptRowToClient(row: Record<string, unknown>): PaymentReceipt {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id ?? row.userId ?? ''),
+    userName: String(row.user_name ?? row.userName ?? ''),
+    userPhone: (row.user_phone ?? row.userPhone ?? undefined) as string | undefined,
+    type: (row.type ?? 'vip_subscription') as PaymentReceipt['type'],
+    planId: (row.plan_id ?? row.planId ?? undefined) as string | undefined,
+    planName: (row.plan_name ?? row.planName ?? undefined) as string | undefined,
+    contentId: (row.content_id ?? row.contentId ?? undefined) as string | undefined,
+    contentTitle: (row.content_title ?? row.contentTitle ?? undefined) as string | undefined,
+    amount: Number(row.amount ?? 0),
+    discountApplied: Number(row.discount_applied ?? row.discountApplied ?? 0),
+    promoCodeUsed: (row.promo_code_used ?? row.promoCodeUsed ?? undefined) as string | undefined,
+    receiptImageUrl: String(row.receipt_image_url ?? row.receiptImageUrl ?? ''),
+    notes: (row.notes ?? undefined) as string | undefined,
+    status: (row.status ?? 'pending') as PaymentReceipt['status'],
+    createdAt: String(row.created_at ?? row.createdAt ?? new Date().toISOString()),
+    reviewedAt: (row.reviewed_at ?? row.reviewedAt ?? undefined) as string | undefined,
+    reviewedBy: (row.reviewed_by ?? row.reviewedBy ?? undefined) as string | undefined,
   };
-  all.unshift(newReceipt);
-  setItem(KEYS.RECEIPTS, all);
+}
 
-  // Sync to Backend (SQLite)
-  if (typeof window !== 'undefined') {
-    getAuthHeaders().then((authHeaders) => {
-      fetch('/api/sync-receipt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders },
-        body: JSON.stringify(newReceipt)
-      }).catch(console.error);
-    });
+/**
+ * To'lov chekini yuboradi.
+ *
+ * ═══ QAYTA YOZILDI: SERVER BIRINCHI, KESH KEYIN ═══
+ *
+ * ESKI KOD localStorage'ga yozib, keyin serverga "otib yuborardi"
+ * (fire-and-forget) va natijani KUTMASDAN chekni qaytarardi:
+ *
+ *   all.unshift(newReceipt);
+ *   setItem(KEYS.RECEIPTS, all);              // <- kvota tugasa jimgina yiqiladi
+ *   getAuthHeaders().then(() => fetch('/api/sync-receipt', ...).catch(console.error));
+ *   return newReceipt;                        // <- doim "muvaffaqiyat"
+ *
+ * Oqibatlari:
+ *  - chek rasmi base64 bo'lgani uchun `setItem` localStorage kvotasini yorib,
+ *    yozuv SAQLANMAY qolardi — lekin funksiya baribir chekni qaytarardi va
+ *    UI "yuborildi" deb ko'rsatardi;
+ *  - server so'rovi 401/500 bo'lsa ham foydalanuvchi buni bilmasdi;
+ *  - chek `id` si klientda yaratilardi, ya'ni ikki qurilma bir xil id
+ *    yaratishi (yoki foydalanuvchi id ni o'zi tanlashi) mumkin edi.
+ *
+ * Endi: chek AVVAL serverga yoziladi (id ham serverda yaratiladi), va faqat
+ * muvaffaqiyatdan keyin localStorage keshiga qo'shiladi. Xato bo'lsa
+ * `throw` qiladi — chaqiruvchi (PaymentModal) foydalanuvchiga ko'rsatadi.
+ */
+export async function submitPaymentReceipt(
+  receiptData: Omit<PaymentReceipt, 'id' | 'createdAt' | 'status'>
+): Promise<PaymentReceipt> {
+  const authHeaders = await getAuthHeaders();
+
+  // Telegram tashqarisida token bo'lmaydi — bu holda chekni yuborish
+  // MUMKIN EMAS. Ilgari so'rov baribir yuborilib, server 401 qaytarardi va
+  // xato `console.error` da qolardi.
+  if (!authHeaders.Authorization) {
+    throw new Error(
+      "Tizimga kirilmagan. Chek yuborish uchun ilovani Telegram bot orqali ochishingiz kerak."
+    );
   }
 
-  // Send new receipt alert & /approve_<id> command to Telegram Bot
+  let res: Response;
+  try {
+    res = await fetch('/api/receipts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify(receiptData),
+    });
+  } catch {
+    throw new Error('Serverga ulanib bo\'lmadi. Internet aloqasini tekshiring.');
+  }
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok || !data.receipt) {
+    throw new Error(data?.error || `Server xatosi (${res.status})`);
+  }
+
+  const newReceipt = receiptRowToClient(data.receipt);
+
+  // Kesh: server javobini localStorage'ga qo'shamiz. Bu yozuv MUVAFFAQIYATSIZ
+  // bo'lsa ham chek allaqachon serverda — shuning uchun faqat ogohlantiramiz.
+  try {
+    const all = getStoredReceipts();
+    all.unshift(newReceipt);
+    setItem(KEYS.RECEIPTS, all);
+  } catch (err) {
+    console.warn('[Receipts] Keshga yozilmadi (chek serverda saqlangan):', err);
+  }
+
+  // Telegram botga xabar (server allaqachon adminlarga SSE yuboradi —
+  // bu qo'shimcha kanal, shuning uchun xatosi chekni bekor qilmaydi)
   const settings = getStoredSettings();
   notifyReceiptSubmissionViaTelegram(newReceipt, settings).catch((err) => {
     console.warn('[TelegramBot] Failed to send submission alert:', err);
@@ -1601,11 +1863,19 @@ export function getDailyCheckInStatus(user: UserProfile): CheckInStatus {
     currentStreak = 0;
     nextDayToClaim = 1;
 
-    // Reset stored streak to 0 if they missed a day
-    if (user.dailyCheckIn && user.dailyCheckIn.streak > 0 && lastDate && lastDate !== todayStr && lastDate !== yesterdayStr) {
-      user.dailyCheckIn.streak = 0;
-      saveStoredUser(user);
-    }
+    // ═══ TUZATILDI: RENDER PAYTIDA localStorage'GA YOZISH ═══
+    // ESKI KOD shu yerda streak'ni nolga tushirib `saveStoredUser(user)`
+    // chaqirardi. `getDailyCheckInStatus` esa DailyCheckInWidget'ning
+    // `useState(...)` boshlang'ich qiymatida chaqiriladi — ya'ni render
+    // paytida global holat o'zgarib, `manyak_storage_update` hodisasi
+    // App.refreshData() ni ishga tushirardi, u yangi `user` obyekti
+    // qaytarardi, widget'ning `useEffect([user])` esa yana shu funksiyani
+    // chaqirardi. Tsikl faqat ikkinchi o'tishda `streak === 0` bo'lgani
+    // uchun to'xtardi — juda mo'rt.
+    //
+    // Endi bu funksiya SOF: streak uzilganini shunchaki HISOBLAB qaytaradi
+    // (`currentStreak = 0`), hech narsa yozmaydi. Haqiqiy qiymat keyingi
+    // `claimDailyCheckInReward` chaqiruvida serverda hisoblanadi.
   }
 
   const rewardIndex = Math.max(0, Math.min(6, nextDayToClaim - 1));
@@ -1714,75 +1984,84 @@ export function claimDailyCheckInReward(userId: string): {
   };
 }
 
-// Spend 1 Access Token to unlock ONLY 1 specific episode or 1 movie
-// Qoida: 1 ta token to'liq serialni emas, faqat 1 qismini ocha olsin.
-// Qolgan seriallarga va shu serialning boshqa qismlariga o'tmasin.
-// Xohlasa 10-qism, xohlasa 20-qism, faqat tanlangan 1 ta serialda 1 ta qism ochilsin!
-export function useAccessTokenToUnlock(
+// ═══════════════════════════════════════════════════════════════════════════
+//  TOKEN BILAN 1 TA QISMNI OCHISH — SERVER TOMONIDA
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ESKI KODDA 3 TA XATO BOR EDI:
+//
+// 1) PUL OQISHI: `unlockedEpisodeIds` ga `${contentId}:${episodeId}` bilan
+//    BIR QATORDA yalang'och `episodeId` ham qo'shilardi:
+//        user.unlockedEpisodeIds.push(epTokenKey);
+//        user.unlockedEpisodeIds.push(episodeId);   // <- XATO
+//    `checkHasAccess` esa yalang'och id ni ham qabul qiladi. Qism id'lari
+//    ('ep1', 'ep2', ...) seriallar orasida takrorlanganligi uchun, A
+//    serialning 1-qismini token bilan ochgan odam BARCHA seriallarning
+//    1-qismini bepul ko'ra olardi. Bu funksiya ustidagi izohda yozilgan
+//    qoidaga to'g'ridan-to'g'ri qarama-qarshi.
+//
+// 2) BUTUNLAY KLIENT TOMONIDA: token hisobi va ochilgan qismlar
+//    localStorage'da kamaytirilardi/qo'shilardi. Konsoldan
+//    `accessTokens: 999` yozib, cheksiz qism ochish mumkin edi.
+//
+// 3) `use` PREFIKSI: nomi `use...` bilan boshlanadi, lekin bu React hook
+//    emas — `onClick` ichida chaqirilgani uchun `react-hooks/rules-of-hooks`
+//    lint qoidasi buzilardi. Yangi nom: `spendTokenToUnlock`.
+//
+// ENDI: server `POST /api/tokens/unlock` da tokenni kamaytiradi va faqat
+// `contentId:episodeId` kalitini saqlaydi (yalang'och id YO'Q — buni
+// server testida tasdiqladim). Klient natijani keshga yozadi.
+export async function spendTokenToUnlock(
   userId: string,
   contentId: string,
   title?: string,
   episodeId?: string,
   episodeTitle?: string
-): { success: boolean; message: string; user?: UserProfile } {
-  const allUsers = getStoredUsers();
-  let user = allUsers.find((u) => u.id === userId);
-  const current = getStoredCurrentUser();
-
-  if (!user && (current.id === userId)) {
-    user = current;
-  }
-  if (!user) {
-    return { success: false, message: "Foydalanuvchi topilmadi." };
-  }
-
-  if (!user.accessTokens || user.accessTokens < 1) {
+): Promise<{ success: boolean; message: string; user?: UserProfile }> {
+  const authHeaders = await getAuthHeaders();
+  if (!authHeaders.Authorization) {
     return {
       success: false,
-      message: "Sizda yetarli bepul ko'rish tokenlari mavjud emas! Kunlik bonusdan har kuni token oling.",
+      message: "Tizimga kirilmagan. Tokendan foydalanish uchun ilovani Telegram bot orqali ochingiz.",
     };
   }
 
-  user.accessTokens -= 1;
-
-  if (episodeId) {
-    // FAQAT 1 TA QISMNI OCHISH:
-    // Serialning butun ID si purchasedContentIds ga qo'shilmaydi!
-    // Faqat ushbu aniq qism identifikatori unlockedEpisodeIds ga qo'shiladi!
-    if (!user.unlockedEpisodeIds) user.unlockedEpisodeIds = [];
-    const epTokenKey = `${contentId}:${episodeId}`;
-    if (!user.unlockedEpisodeIds.includes(epTokenKey)) {
-      user.unlockedEpisodeIds.push(epTokenKey);
-    }
-    if (!user.unlockedEpisodeIds.includes(episodeId)) {
-      user.unlockedEpisodeIds.push(episodeId);
-    }
-  } else {
-    // Alohida film (bitta to'liq kino) ochilishi
-    if (!user.purchasedContentIds) user.purchasedContentIds = [];
-    if (!user.purchasedContentIds.includes(contentId)) {
-      user.purchasedContentIds.push(contentId);
-    }
+  let res: Response;
+  try {
+    res = await fetch('/api/tokens/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ userId, contentId, episodeId, title, episodeTitle }),
+    });
+  } catch {
+    return { success: false, message: "Serverga ulanib bo'lmadi. Internet aloqasini tekshiring." };
   }
 
-  saveStoredUser(user);
+  if (res.status === 401) invalidateAuthToken();
 
-  if (current.id === userId) {
-    saveStoredCurrentUser({ ...current, ...user });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok) {
+    return {
+      success: false,
+      message: data?.message || data?.error || `Qismni ochib bo'lmadi (status ${res.status}).`,
+    };
   }
 
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('manyak_storage_update'));
-  }
+  // Server yangi holatni qaytardi — keshni ANIQ shu qiymat bilan yangilaymiz
+  await syncEntitlementsFromServer();
 
   const detailText = episodeTitle
     ? `"${title || 'Serial'}"ning ${episodeTitle}i`
     : `"${title || 'Tanlangan kontent'}"`;
 
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('manyak_storage_update'));
+  }
+
   return {
     success: true,
     message: `1 ta Token sarflandi. Faqat ${detailText} ochildi! Serialning boshqa qismlariga o'tmaydi.`,
-    user,
+    user: getItem<UserProfile | null>(KEYS.CURRENT_USER, null) || undefined,
   };
 }
 

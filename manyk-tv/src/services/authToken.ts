@@ -63,3 +63,19 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
   const token = await getBackendAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
+
+/**
+ * Keshlangan tokenni bekor qiladi — keyingi so'rovda yangisi olinadi.
+ *
+ * NEGA KERAK: token 23 soatga modul xotirasida keshlanadi va ilgari uni
+ * BEKOR QILISH YO'LI YO'Q EDI. Agar server qayta ishga tushsa yoki
+ * JWT_SECRET almashtirilsa, mavjud token yaroqsiz bo'lib qoladi — lekin
+ * klient uni 23 soat davomida yuborishda davom etardi va HAR BIR so'rov
+ * 401 bilan qaytardi. Foydalanuvchi uchun bu "hech narsa ishlamayapti"
+ * degani, yechim esa faqat sahifani to'liq qayta yuklash bo'lardi.
+ * Endi 401 javob olingan joyda shu funksiya chaqiriladi.
+ */
+export function invalidateAuthToken(): void {
+  cachedToken = null;
+  cachedTokenExpiresAt = 0;
+}
