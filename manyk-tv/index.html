@@ -2,7 +2,14 @@
 <html lang="uz" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <!-- ESKI QIYMAT: maximum-scale=1.0, user-scalable=no
+       -->
+    <!-- Bu telefonda barmoq bilan KATTALASHTIRISHNI (pinch-zoom) butunlay
+         o'chirib qo'yardi. Ko'zi yaxshi ko'rmaydigan foydalanuvchi matnni
+         kattalashtira olmasdi (WCAG 1.4.4 buzilishi), va kichik tugmalarni
+         bosish qiyin bo'lardi. Video ilovasi asosan telefonda ishlatilgani
+         uchun bu sezilarli muammo edi. Endi kattalashtirish mumkin. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>MANYAK TV</title>
     <meta name="description" content="Telegram WebApp kino, serial va vertikal short dramalar platformasi, obuna va admin paneli bilan." />
     <meta property="og:title" content="MANYAK TV" />
@@ -14,7 +21,14 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   </head>
-  <body class="bg-[#09090b] text-[#f4f4f5] antialiased selection:bg-red-600 selection:text-white select-none overflow-x-hidden min-h-screen">
+  <!-- ESKI KOD'da `select-none` klassi BUTUN body ga qo'yilgan edi — ya'ni
+       saytdagi HECH QANDAY matnni tanlab, nusxalab bo'lmasdi. Bu himoya
+       bermaydi (matn baribir DOM va sahifa manbasida turadi), lekin
+       foydalanuvchiga xalaqit beradi: xato xabarini, karta raqamini yoki
+       chek ID sini nusxalash imkonsiz bo'lardi.
+       Endi matn normal tanlanadi; interfeys elementlari (tugmalar, slayder)
+       uchun kerakli joylarda `select-none` alohida qo'llaniladi. -->
+  <body class="bg-[#09090b] text-[#f4f4f5] antialiased selection:bg-red-600 selection:text-white overflow-x-hidden min-h-screen">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

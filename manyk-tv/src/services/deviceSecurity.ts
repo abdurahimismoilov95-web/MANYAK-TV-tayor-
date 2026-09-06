@@ -607,40 +607,70 @@ export function resetUserHWIDBinding(userId: string): boolean {
 }
 
 // Anti-piracy & inspect protection
+/**
+ * Media uchun yengil himoya choralari.
+ *
+ * ═══ OLIB TASHLANDI: KLAVIATURA VA O'NG TUGMANI BLOKLASH ═══
+ *
+ * ESKI KOD butun ilova bo'ylab quyidagilarni bloklardi:
+ *
+ *     if (e.key === 'F12' ||
+ *         (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C')) ||
+ *         (e.ctrlKey && (e.key === 'u' || e.key === 's' || e.key === 'p'))) {
+ *       e.preventDefault();
+ *     }
+ *     window.addEventListener('contextmenu', e => e.preventDefault());
+ *
+ * NEGA OLIB TASHLANDI:
+ *
+ * 1) HIMOYA BERMAYDI. DevTools brauzer menyusidan (⋮ -> Ko'proq vositalar ->
+ *    Ishlab chiquvchi vositalari) baribir ochiladi; sahifa yuklanishidan
+ *    oldin F12 bosish ham ishlaydi; JavaScript'ni o'chirish esa bu kodni
+ *    butunlay bekor qiladi. Video manzili baribir DOM va Network'da
+ *    ko'rinadi — ya'ni bu chora faqat ko'rinish uchun (security theater).
+ *
+ * 2) HAQIQIY ZARAR KELTIRADI:
+ *    - Ctrl+S (saqlash) va Ctrl+P (chop etish) ishlamaydi;
+ *    - o'ng tugma bloklangani uchun oddiy nusxalash/qo'yish buziladi;
+ *    - saytning EGASI o'z saytidagi muammoni tekshira olmaydi — aynan shu
+ *      holat yuz berdi: deploy'dan keyin tashxis qo'yish uchun F12 kerak
+ *      bo'lganda, sayt uni bloklab turdi.
+ *
+ * QOLDIRILGANI: faqat `<video>` elementida o'ng tugma menyusi va media
+ * elementlarini sichqoncha bilan tortib olish (drag) to'xtatiladi. Bu
+ * qolgan interfeysga tegmaydi — nusxalash, chop etish, DevTools va
+ * klaviatura normal ishlaydi.
+ *
+ * MUHIM: kontentni haqiqiy himoyalash brauzerda emas, SERVERDA bo'ladi —
+ * ya'ni video manzillariga faqat huquqi bor foydalanuvchi kirishi kerak
+ * (signed URL / vaqtinchalik token). Buni kelajakda qo'shish tavsiya
+ * etiladi; brauzerdagi bloklashlar esa hech qanday himoya bermaydi.
+ */
 export function initSecurityGuards(): () => void {
   if (typeof window === 'undefined') return () => {};
 
-  // Disable right-click context menu (prevents video download, save-as, inspecting)
+  // Faqat video ustida o'ng tugma menyusi ("Videoni saqlash" bandini yashiradi).
+  // Qolgan joylarda o'ng tugma NORMAL ishlaydi.
   const handleContextMenu = (e: MouseEvent) => {
-    e.preventDefault();
-    return false;
-  };
-
-  // Keyboard shortcut protection (F12, Ctrl+Shift+I, Ctrl+U, Ctrl+S, Ctrl+P)
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (
-      e.key === 'F12' ||
-      (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C')) ||
-      (e.ctrlKey && (e.key === 'u' || e.key === 's' || e.key === 'p'))
-    ) {
+    const target = e.target as HTMLElement | null;
+    if (target?.tagName === 'VIDEO') {
       e.preventDefault();
-      return false;
     }
   };
 
-  // Prevent drag and drop of media assets
+  // Rasm/videoni sichqoncha bilan tortib olishni to'xtatish (zararsiz).
   const handleDragStart = (e: DragEvent) => {
-    e.preventDefault();
-    return false;
+    const target = e.target as HTMLElement | null;
+    if (target?.tagName === 'VIDEO' || target?.tagName === 'IMG') {
+      e.preventDefault();
+    }
   };
 
   window.addEventListener('contextmenu', handleContextMenu);
-  window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('dragstart', handleDragStart);
 
   return () => {
     window.removeEventListener('contextmenu', handleContextMenu);
-    window.removeEventListener('keydown', handleKeyDown);
     window.removeEventListener('dragstart', handleDragStart);
   };
 }
