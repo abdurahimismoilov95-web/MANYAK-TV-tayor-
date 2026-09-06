@@ -1,0 +1,26 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+# ESKI QOIDA: "data/" (boshida "/" siz) Git'da PAPKA NOMI HAR QANDAY chuqurlikda
+# uchrasa e'tiborsiz qoldiriladi. Bu nafaqat backend'ning `data/manyktv.db`
+# papkasini, balki src/data/ (masalan, src/data/initialData.ts — frontend
+# ISHLASHI UCHUN SHART bo'lgan boshlang'ich kontent/tariflar fayli) ni ham
+# butunlay Git tashqarisida qoldirgan! Aynan shu sababli bu zip'da
+# `src/data/initialData.ts` fayli UMUMAN YO'Q va loyiha HOZIRGI holida
+# `npm run build` qilinganda "Cannot find module '../data/initialData'"
+# xatosi bilan yiqiladi. Faqat ildizdagi backend `data/` papkasi
+# e'tiborsiz qoldirilishi kerak edi — shuning uchun qoida "/data/" ga
+# (ildizga bog'langan holga) o'zgartirildi.
+/data/
+
+# Admin tomonidan yuklangan poster/video fayllar shu yerga (disk'ga)
+# saqlanadi (qarang: server.js /api/upload). Bular foydalanuvchi
+# ma'lumoti bo'lgani va katta hajmda bo'lishi mumkinligi uchun Git'ga
+# qo'shilmaydi — serverni deploy qilganda bu papka alohida saqlanishi
+# yoki backup qilinishi kerak.
+/uploads/

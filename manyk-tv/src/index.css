@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #121216;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #dc2626;
+}
+
+@keyframes shimmerWave {
+  0% {
+    transform: translateX(-100%) skewX(-15deg);
+  }
+  100% {
+    transform: translateX(200%) skewX(-15deg);
+  }
+}
+
+.animate-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.animate-shimmer::after {
+  position: absolute;
+  top: -50%;
+  right: -50%;
+  bottom: -50%;
+  left: -50%;
+  transform: translateX(-100%) skewX(-15deg);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.01) 30%,
+    rgba(255, 255, 255, 0.06) 50%,
+    rgba(255, 255, 255, 0.01) 70%,
+    transparent 100%
+  );
+  animation: shimmerWave 2s infinite ease-in-out;
+  content: '';
+  pointer-events: none;
+  z-index: 50;
+}
+
+@keyframes roamWide {
+  0% { top: 15%; left: 10%; transform: translate(0, 0); }
+  25% { top: 80%; left: 85%; transform: translate(-100%, -100%); }
+  50% { top: 15%; left: 85%; transform: translate(-100%, 0); }
+  75% { top: 80%; left: 10%; transform: translate(0, -100%); }
+  100% { top: 15%; left: 10%; transform: translate(0, 0); }
+}
+
+@keyframes roamVertical {
+  0% { top: 10%; left: 10%; transform: translate(0, 0); }
+  25% { top: 85%; left: 80%; transform: translate(-100%, -100%); }
+  50% { top: 25%; left: 80%; transform: translate(-100%, 0); }
+  75% { top: 85%; left: 10%; transform: translate(0, -100%); }
+  100% { top: 10%; left: 10%; transform: translate(0, 0); }
+}
+
+.animate-roam-wide {
+  position: absolute;
+  animation: roamWide 30s ease-in-out infinite;
+}
+
+.animate-roam-vertical {
+  position: absolute;
+  animation: roamVertical 25s ease-in-out infinite;
+}
+
+body {
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  background-color: #09090b;
+  color: #f4f4f5;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@keyframes gentleBreathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+.animate-breathe {
+  animation: gentleBreathe 2.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
