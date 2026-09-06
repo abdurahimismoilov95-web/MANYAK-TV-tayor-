@@ -475,6 +475,75 @@ export default function App() {
     }
   }, [isAdmin, isAdminPanelOpen]);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  BOT XABARNOMASIDAGI HAVOLANI OCHISH (deep link)
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // Bot xabarnomasidagi tugma `web_app` turida bo'lib, ilovani Telegram
+  // ICHIDA quyidagi manzil bilan ochadi:
+  //     https://<domen>/?content=<kontent_id>&ep=<qism_id>
+  // yoki VIP taklifi uchun:
+  //     https://<domen>/?vip=1
+  //
+  // Bu yerda o'sha parametrlarni o'qib, kerakli kontentni (va tanlangan
+  // qismni) darhol ochamiz. Ilgari bunday imkoniyat YO'Q edi — havola
+  // shunchaki bosh sahifani ochardi va foydalanuvchi e'lon qilingan
+  // kinoni O'ZI qidirishi kerak bo'lardi.
+  //
+  // Huquq tekshiruvi PLEYER ichida bo'ladi (`checkHasAccess`): VIP yoki
+  // sotib olgan bo'lsa video o'ynaydi, aks holda "VIP obuna bo'lish"
+  // ekrani ko'rsatiladi. Ya'ni bu yerda alohida tekshiruv kerak emas.
+  const deepLinkHandledRef = React.useRef(false);
+
+  useEffect(() => {
+    if (deepLinkHandledRef.current) return;
+    // Kontent ro'yxati yuklanmaguncha kutamiz
+    if (contents.length === 0) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const wantedContent = params.get('content');
+    const wantedEpisode = params.get('ep');
+    const wantsVip = params.get('vip');
+
+    if (!wantedContent && !wantsVip) {
+      deepLinkHandledRef.current = true;
+      return;
+    }
+
+    deepLinkHandledRef.current = true;
+
+    if (wantsVip) {
+      setIsPaymentModalOpen(true);
+    } else if (wantedContent) {
+      const item = contents.find((c) => c.id === wantedContent);
+      if (item) {
+        setActiveVideoContent(item);
+        // Qism ko'rsatilgan bo'lsa — aynan shu qismni ochamiz,
+        // aks holda birinchi qismni (yoki kinoning o'zini)
+        const epId =
+          (wantedEpisode && item.episodes?.some((e) => e.id === wantedEpisode) ? wantedEpisode : undefined) ??
+          (item.episodes && item.episodes.length > 0 ? item.episodes[0].id : undefined);
+        setActiveEpisodeId(epId);
+      } else {
+        // Kontent o'chirilgan yoki bu foydalanuvchiga ko'rinmaydi
+        setPaymentToast({
+          id: String(Date.now()),
+          type: 'error',
+          title: 'Kontent topilmadi',
+          message: "E'lon qilingan kino yoki serial mavjud emas.",
+        });
+      }
+    }
+
+    // Manzilni tozalaymiz — sahifa yangilanganda pleyer qayta ochilmasligi
+    // va havola tarixda qolmasligi uchun.
+    try {
+      window.history.replaceState({}, '', window.location.pathname);
+    } catch {
+      // history mavjud bo'lmasa e'tiborsiz qoldiramiz
+    }
+  }, [contents]);
+
   // Handle video selection (Both Movies and Dramas open directly)
   const handleSelectContent = (item: ContentItem, episodeId?: string) => {
     setActiveVideoContent(item);

@@ -1494,64 +1494,212 @@ async function tgAnswer(cbId, text) {
   return tgApi('answerCallbackQuery', { callback_query_id: cbId, text });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  BOT XABARNOMASI — TO'LIQ QAYTA YOZILDI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ═══ ESKI KODDAGI 4 TA MUAMMO ═══
+//
+// 1) TUGMA TASHQI BRAUZERGA OLIB KETARDI:
+//        inline_keyboard: [[{ text: buttonText, url: buttonUrl }]]
+//    `url:` — Telegram bu havolani TASHQI brauzerda ochadi, ya'ni
+//    foydalanuvchi ilovadan chiqib ketardi. Endi `web_app:` ishlatiladi —
+//    ilova Telegram ICHIDA ochiladi.
+//
+// 2) YUKLANGAN POSTER YUBORILMASDI: `photoUrl.startsWith('http')` sharti
+//    bor edi, yuklangan rasmlar esa nisbiy manzilda (`/uploads/x.jpg`).
+//    Ya'ni admin panelidan yuklangan afisha xabarga QO'SHILMASDI.
+//    Bundan tashqari `/uploads` endi himoyalangan — Telegram serverlari
+//    unga cookie'siz kira olmaydi. Shuning uchun rasm URL orqali emas,
+//    FAYL sifatida (multipart) yuklanadi va Telegram qaytargan `file_id`
+//    keyingi yuborishlarda qayta ishlatiladi (tez va tejamkor).
+//
+// 3) QISM (EPISODE) TANLASH IMKONIYATI YO'Q EDI. Mini drama va seriallar
+//    uchun aniq qismni belgilab, havola to'g'ridan-to'g'ri o'sha qismni
+//    ochadigan qilish kerak edi.
+//
+// 4) HAMMAGA BIR XIL TUGMA KETARDI. Endi har bir foydalanuvchining
+//    huquqi tekshiriladi: VIP yoki sotib olgan bo'lsa — "Tomosha qilish",
+//    aks holda — "VIP obuna bo'lish" tugmasi.
+
+/** Telegramga rasmni FAYL sifatida yuklab, `file_id` qaytaradi. */
+async function uploadPhotoToTelegram(chatId, absPath, caption, replyMarkup) {
+  const buffer = fs.readFileSync(absPath);
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('caption', caption);
+  form.append('parse_mode', 'HTML');
+  if (replyMarkup) form.append('reply_markup', JSON.stringify(replyMarkup));
+  form.append('photo', new Blob([buffer]), path.basename(absPath));
+
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+    method: 'POST',
+    body: form,
+  });
+  const data = await res.json();
+  // Eng katta o'lchamdagi rasmning file_id si — keyingi yuborishlar uchun
+  const fileId = data?.result?.photo?.at(-1)?.file_id || null;
+  return { ok: Boolean(data?.ok), fileId, description: data?.description };
+}
+
+/** Poster manzilini diskdagi haqiqiy faylga aylantiradi (xavfsiz). */
+function resolvePosterFile(posterUrl) {
+  if (!posterUrl || typeof posterUrl !== 'string') return null;
+  if (!posterUrl.startsWith('/uploads/')) return null;
+
+  const name = path.basename(posterUrl.split('?')[0]);
+  const abs = path.join(UPLOADS_DIR, name);
+  // Papkadan chiqib ketishga yo'l qo'ymaymiz (path traversal himoyasi)
+  if (!abs.startsWith(UPLOADS_DIR)) return null;
+  return fs.existsSync(abs) ? abs : null;
+}
+
 app.post('/api/broadcast', auth, adminOnly, async (req, res) => {
-  const { text, photoUrl, buttonText, buttonUrl } = req.body;
-  if (!text) return res.status(400).json({ ok: false, error: 'Matn kerak' });
+  const { text, contentId, episodeId, attachPoster = true } = req.body || {};
+  if (!text || !String(text).trim()) return res.status(400).json({ ok: false, error: 'Matn kerak' });
   if (!BOT_TOKEN) return res.status(503).json({ ok: false, error: 'Bot token sozlanmagan' });
 
-  try {
-    const allUsers = Users.getAll();
-    let successCount = 0;
-    
-    // Yuborish uchun payload tayyorlash
-    const payloadTemplate = { parse_mode: 'HTML' };
-    if (buttonText && buttonUrl) {
-      payloadTemplate.reply_markup = {
-        inline_keyboard: [[{ text: buttonText, url: buttonUrl }]]
-      };
+  // ─── Kontent va qismni SERVERDAN olamiz (klientga ishonmaymiz) ───
+  let content = null;
+  let episode = null;
+  if (contentId) {
+    content = Contents.getById(String(contentId));
+    if (!content) return res.status(404).json({ ok: false, error: 'Kontent topilmadi' });
+
+    if (episodeId) {
+      episode = (content.episodes || []).find((e) => String(e.id) === String(episodeId)) || null;
+      if (!episode) return res.status(404).json({ ok: false, error: 'Qism topilmadi' });
     }
-    if (photoUrl && photoUrl.startsWith('http')) {
-      payloadTemplate.photo = photoUrl;
-      payloadTemplate.caption = text;
-    } else {
-      payloadTemplate.text = text;
-    }
-
-    const endpoint = photoUrl && photoUrl.startsWith('http') ? 'sendPhoto' : 'sendMessage';
-
-    // Asinxron yuborish (server qotmasligi uchun)
-    res.json({ ok: true, totalUsers: allUsers.length, message: "Xabarnoma yuborish boshlandi" });
-
-    // Orqa fonda yuborish
-    (async () => {
-      for (const user of allUsers) {
-        if (!user.id) continue;
-        try {
-          const payload = { ...payloadTemplate, chat_id: user.id };
-          const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if (response.ok) {
-            successCount++;
-          } else {
-            const errData = await response.json();
-            console.error(`[Broadcast API Error for user ${user.id}]:`, errData.description);
-          }
-          // API limit (30 req/sec) dan oshmaslik uchun kutish
-          await new Promise(resolve => setTimeout(resolve, 50));
-        } catch (e) {
-          console.error(`[Broadcast Network Error]:`, e.message);
-        }
-      }
-      AuditLogs.add({ adminId: req.user.id, action: 'BROADCAST', details: `${successCount} ta foydalanuvchiga yuborildi.` });
-    })();
-
-  } catch (err) {
-    console.error('[Broadcast]', err);
-    if (!res.headersSent) res.status(500).json({ ok: false, error: 'Xatolik yuz berdi' });
   }
+
+  // ─── Ilova ichida ochiladigan havola ───
+  // `web_app` tugmasi ilovani Telegram ICHIDA ochadi. Query parametrlari
+  // saqlanadi, frontend esa ularni o'qib to'g'ridan-to'g'ri shu kontentni
+  // (va tanlangan qismni) ochadi.
+  let webAppUrl = null;
+  if (APP_URL && content) {
+    const params = new URLSearchParams({ content: content.id });
+    if (episode) params.set('ep', String(episode.id));
+    webAppUrl = `${APP_URL}/?${params.toString()}`;
+  }
+  const vipUrl = APP_URL ? `${APP_URL}/?vip=1` : null;
+
+  /**
+   * Har bir foydalanuvchi uchun ALOHIDA tugmalar.
+   * VIP yoki sotib olgan bo'lsa — tomosha; aks holda — VIP taklifi.
+   */
+  function buildMarkup(user) {
+    if (!webAppUrl) return null;
+
+    const hasVip = Boolean(user.isVip) &&
+      (!user.vipExpiresAt || new Date(user.vipExpiresAt).getTime() > Date.now());
+    const purchased = Array.isArray(user.purchasedContentIds) &&
+      user.purchasedContentIds.includes(content.id);
+    const unlockedEpisode = episode && Array.isArray(user.unlockedEpisodeIds) &&
+      user.unlockedEpisodeIds.includes(`${content.id}:${episode.id}`);
+    const isFreeItem = !content.isPremium && (!content.price || content.price === 0);
+    const isFreeEpisode = episode ? Boolean(episode.isFree) : false;
+
+    const hasAccess = hasVip || purchased || unlockedEpisode || isFreeItem || isFreeEpisode;
+
+    // IXCHAM TUGMALAR: bitta qatorda, qisqa matn bilan
+    if (hasAccess) {
+      return { inline_keyboard: [[{ text: '▶️ Tomosha qilish', web_app: { url: webAppUrl } }]] };
+    }
+    return {
+      inline_keyboard: [[
+        { text: '💎 VIP olish', web_app: { url: vipUrl || webAppUrl } },
+        { text: '👁 Ko\'rish', web_app: { url: webAppUrl } },
+      ]],
+    };
+  }
+
+  // ─── Xabar matni ───
+  const parts = [String(text).trim()];
+  if (content) {
+    parts.push('');
+    parts.push(`🎬 <b>${escapeTgHtml(content.title)}</b>`);
+    if (episode) {
+      const epLabel = episode.title || `${episode.episodeNumber || ''}-qism`;
+      parts.push(`📺 ${escapeTgHtml(epLabel)}`);
+    }
+  }
+  const caption = parts.join('\n');
+
+  const posterFile = attachPoster && content ? resolvePosterFile(content.posterUrl) : null;
+  const posterHttpUrl =
+    attachPoster && content && typeof content.posterUrl === 'string' && content.posterUrl.startsWith('http')
+      ? content.posterUrl
+      : null;
+
+  const allUsers = Users.getAll().filter((u) => u.id && !u.isBanned);
+
+  res.json({
+    ok: true,
+    totalUsers: allUsers.length,
+    withPoster: Boolean(posterFile || posterHttpUrl),
+    opensInApp: Boolean(webAppUrl),
+    message: `Xabarnoma ${allUsers.length} ta foydalanuvchiga yuborilmoqda…`,
+  });
+
+  // ─── Orqa fonda yuborish ───
+  (async () => {
+    let sent = 0;
+    let failed = 0;
+    // Rasmni BIR MARTA yuklab, keyin `file_id` ni qayta ishlatamiz —
+    // aks holda har bir foydalanuvchi uchun fayl qaytadan yuklanardi.
+    let cachedFileId = null;
+
+    for (const user of allUsers) {
+      try {
+        const markup = buildMarkup(user);
+
+        if (posterFile && !cachedFileId) {
+          const up = await uploadPhotoToTelegram(user.id, posterFile, caption, markup);
+          if (up.ok) {
+            cachedFileId = up.fileId;
+            sent++;
+          } else {
+            failed++;
+            console.error(`[Broadcast] ${user.id}: ${up.description}`);
+          }
+        } else {
+          const photo = cachedFileId || posterHttpUrl;
+          const endpoint = photo ? 'sendPhoto' : 'sendMessage';
+          const payload = { chat_id: user.id, parse_mode: 'HTML' };
+          if (photo) {
+            payload.photo = photo;
+            payload.caption = caption;
+          } else {
+            payload.text = caption;
+            payload.disable_web_page_preview = true;
+          }
+          if (markup) payload.reply_markup = markup;
+
+          const r = await tgApi(endpoint, payload);
+          if (r.ok) sent++;
+          else {
+            failed++;
+            console.error(`[Broadcast] ${user.id}: ${r.description}`);
+          }
+        }
+      } catch (e) {
+        failed++;
+        console.error('[Broadcast]', e.message);
+      }
+      // Telegram limiti (~30 xabar/sek) dan oshmaslik uchun
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    console.log(`[Broadcast] Yuborildi: ${sent}, muvaffaqiyatsiz: ${failed}`);
+    AuditLogs.add({
+      adminId: req.user.id,
+      action: 'BROADCAST',
+      targetId: content?.id,
+      targetTitle: content?.title,
+      details: `${sent} ta yuborildi, ${failed} ta xato${episode ? ` (qism: ${episode.title || episode.episodeNumber})` : ''}`,
+    });
+  })();
 });
 
 app.post('/api/setup-webhook', auth, adminOnly, async (req, res) => {
