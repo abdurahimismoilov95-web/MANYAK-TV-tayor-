@@ -5,6 +5,7 @@ import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { ContentDetailsModal } from './components/ContentDetailsModal';
 import { PaymentModal } from './components/PaymentModal';
 import { TelegramVerificationModal } from './components/TelegramVerificationModal';
+import { TelegramOnlyGate } from './components/TelegramOnlyGate';
 import { TelegramAuthModal } from './components/TelegramAuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -51,6 +52,7 @@ import {
   checkAccessSecurity,
   getOrCreateDeviceFingerprint,
   initSecurityGuards,
+  isRunningInTelegram,
 } from './services/deviceSecurity';
 import { getAuthHeaders, getBackendAuthToken } from './services/authToken';
 import {
@@ -88,6 +90,11 @@ export default function App() {
   const [paymentTargetContent, setPaymentTargetContent] = useState<ContentItem | null>(null);
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [isPhoneModalOpen, setIsPhoneModalOpen] = useState(false);
+  // Admin brauzerdan kirmoqchi bo'lganda "Telegramda ochingiz" ekranini
+  // vaqtincha yopib, tasdiqlash oynasini ko'rsatish uchun.
+  // (Bu hech qanday huquq bermaydi — token faqat serverdan, admin
+  // tekshiruvidan keyin keladi.)
+  const [isTelegramGateBypassed, setIsTelegramGateBypassed] = useState(false);
   const [isTelegramAuthModalOpen, setIsTelegramAuthModalOpen] = useState(false);
   const [detailsModalContent, setDetailsModalContent] = useState<ContentItem | null>(null);
 
@@ -488,6 +495,39 @@ export default function App() {
   const shortDramas = contents.filter((c) => c.type === 'short_drama');
 
   // If user or hardware device is banned or not opened via Telegram or HWID mismatch detected
+  // ═══════════════════════════════════════════════════════════════════════
+  //  FAQAT TELEGRAM ICHIDA: brauzerdan kirish faqat adminlarga ochiq
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // TALAB: "bot web app bo'lib ishlasin, saytga otib ketmasin; brauzerdan
+  // kirishni bloklasin; faqat admin va admin tayinlagan odamlarga ochiq".
+  //
+  // Bu yerda faqat KO'RINISH (UX) hal qilinadi — haqiqiy bloklash serverda:
+  //   - GET /api/contents, /api/plans -> auth + requireAppAccess
+  //     (faqat `via: 'miniapp'` tokeni yoki admin)
+  //   - /uploads/* (videolar)         -> requireMediaAccess (cookie/token)
+  //   - /api/verify/status            -> brauzerda token faqat adminlarga
+  // Ya'ni bu ekranni chetlab o'tgan odam ham kontent va video olmaydi.
+  //
+  // Admin brauzerdan kirishi mumkin: "Administrator sifatida kirish" tugmasi
+  // bot orqali tasdiqlash oqimini ochadi, server esa admin ekanini
+  // tekshirgach token beradi.
+  const insideTelegram = isRunningInTelegram();
+  if (!insideTelegram && !isAdmin && !isTelegramGateBypassed) {
+    return (
+      <ErrorBoundary>
+        <TelegramOnlyGate
+          onAdminVerify={() => {
+            // Tasdiqlash oynasini ochamiz. Server admin bo'lmasa token
+            // bermaydi va tushunarli xabar qaytaradi.
+            setIsTelegramGateBypassed(true);
+            setIsPhoneModalOpen(true);
+          }}
+        />
+      </ErrorBoundary>
+    );
+  }
+
   if (!securityCheck.isAllowed) {
     const isDevice = securityCheck.banType === 'device';
     const isNotTelegram = securityCheck.banType === 'not_telegram';

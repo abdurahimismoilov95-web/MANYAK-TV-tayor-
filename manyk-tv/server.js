@@ -180,6 +180,109 @@ function auth(req, res, next) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  KIRISH SIYOSATI: ILOVA FAQAT TELEGRAM ICHIDA, BRAUZER — FAQAT ADMINLARGA
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// TALAB: "bot web app bo'lib ishlasin, saytga otib ketmasin; brauzerdan
+// kirishni bloklasin; brauzer faqat admin va admin tayinlagan odamlarga
+// ochiq bo'lsin".
+//
+// BUNI QANDAY ISHONCHLI QILISH MUMKIN:
+//
+// Telegram Mini App ichida ochilganda brauzerga `initData` beriladi — u bot
+// tokeni bilan HMAC-SHA256 imzolangan, ya'ni uni SOXTALASHTIRIB BO'LMAYDI.
+// Oddiy brauzerda esa `initData` YO'Q. Shuning uchun token BERILGAN JOYNI
+// tokenning o'zida belgilab qo'yamiz:
+//
+//     via = 'miniapp'  -> /api/auth/verify (initData HMAC tekshirilgan)
+//     via = 'bot'      -> /api/verify/status (bot orqali kontakt tasdiqlash)
+//
+// Keyin `requireAppAccess` middleware faqat quyidagilarni o'tkazadi:
+//     - Telegram Mini App ichidan kelgan har qanday foydalanuvchi
+//     - yoki ADMIN (qaysi yo'l bilan kirgan bo'lishidan qat'i nazar)
+//
+// MUHIM: frontenddagi "Telegramda ochingiz" ekrani — bu faqat KO'RINISH
+// (UX). Haqiqiy bloklash SHU YERDA, serverda bo'ladi: kontent ro'yxati va
+// video fayllari tokensiz berilmaydi. Aks holda brauzerdagi odam JS ni
+// chetlab o'tib, to'g'ridan-to'g'ri API'dan hammasini olib qo'yardi
+// (ilgari `GET /api/contents` UMUMAN himoyasiz edi).
+
+/** Token Telegram Mini App ichidan berilganmi? */
+function isFromMiniApp(user) {
+  return user?.via === 'miniapp';
+}
+
+function requireAppAccess(req, res, next) {
+  if (isFromMiniApp(req.user) || req.user?.isAdmin) return next();
+
+  return res.status(403).json({
+    ok: false,
+    error: 'browser_blocked',
+    message:
+      "MANYAK TV faqat Telegram ilovasi ichida ishlaydi. Iltimos, botni ochib " +
+      "«MANYAK TV ni ochish» tugmasini bosingiz.",
+  });
+}
+
+// ─── Media (video/rasm) uchun cookie ────────────────────────────────────────
+//
+// `<video src="/uploads/kino.mp4">` so'roviga brauzer `Authorization`
+// header'ini QO'SHA OLMAYDI — ya'ni video fayllarni oddiy JWT bilan
+// himoyalab bo'lmaydi. Shuning uchun token berilgan paytda qo'shimcha
+// httpOnly cookie o'rnatamiz; `<video>` va `<img>` so'rovlari cookie'ni
+// avtomatik yuboradi (same-origin).
+const MEDIA_COOKIE_NAME = 'manyak_media';
+
+function setMediaCookie(res, token) {
+  // 24 soat — JWT muddati bilan bir xil
+  const parts = [
+    `${MEDIA_COOKIE_NAME}=${token}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${24 * 60 * 60}`,
+  ];
+  if (IS_PROD) parts.push('Secure');
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    if (part.slice(0, idx).trim() === name) return part.slice(idx + 1).trim();
+  }
+  return null;
+}
+
+/**
+ * `/uploads` uchun himoya: cookie yoki `?t=` orqali kelgan tokenni tekshiradi.
+ *
+ * ESKI KOD: `app.use('/uploads', express.static(UPLOADS_DIR))` — HECH QANDAY
+ * himoya yo'q edi. Ya'ni video manzilini bilgan istalgan odam (yoki
+ * `GET /api/contents` dan manzillarni olgan odam) barcha kinolarni
+ * to'lovsiz va Telegramdan tashqarida yuklab olardi.
+ */
+function requireMediaAccess(req, res, next) {
+  const token = readCookie(req, MEDIA_COOKIE_NAME) || req.query.t;
+  if (!token) {
+    return res.status(401).type('text/plain').send('Ruxsat yo\'q: ilovani Telegram orqali ochingiz.');
+  }
+  try {
+    const claims = jwt.verify(String(token), JWT_SECRET);
+    if (!isFromMiniApp(claims) && !claims.isAdmin) {
+      return res.status(403).type('text/plain').send('Faqat Telegram ilovasi ichida ko\'rish mumkin.');
+    }
+    req.user = claims;
+    return next();
+  } catch {
+    return res.status(401).type('text/plain').send('Sessiya muddati tugagan.');
+  }
+}
+
 function adminOnly(req, res, next) {
   if (!req.user?.isAdmin) return res.status(403).json({ ok: false, error: 'Admin huquqi kerak' });
   next();
@@ -339,7 +442,16 @@ app.post('/api/auth/verify', (req, res) => {
       username: user.username || '',
     });
     const isAdmin = Admins.isAdmin(String(user.id));
-    const token = jwt.sign({ id: String(user.id), username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
+    // `via: 'miniapp'` — bu token Telegram Mini App ichidan, HMAC bilan
+    // tekshirilgan `initData` asosida berildi. Faqat shu belgiga ega
+    // tokenlar (yoki adminlar) kontentga kira oladi — qarang
+    // `requireAppAccess`.
+    const token = jwt.sign(
+      { id: String(user.id), username: user.username, isAdmin, via: 'miniapp' },
+      JWT_SECRET, { expiresIn: '24h' }
+    );
+    // Video/rasm fayllari uchun cookie (`<video>` header yubora olmaydi)
+    setMediaCookie(res, token);
 
     // ESKI KOD `username` ni FAQAT yangi foydalanuvchi yaratilganda yozardi;
     // mavjud foydalanuvchida esa `firstName`/`lastName` ni yangilab,
@@ -418,11 +530,15 @@ app.post('/api/users/:id/reset-hwid', auth, adminOnly, (req, res) => {
 //  CONTENTS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/contents', (req, res) => {
+// ESKI KOD: `app.get('/api/contents', (req, res) => ...)` — auth YO'Q edi.
+// Ya'ni istalgan odam brauzerdan (yoki `curl` bilan) butun katalogni,
+// jumladan har bir qismning video manzilini olib qo'yardi. Endi kontent
+// faqat Telegram Mini App ichidagi foydalanuvchiga yoki adminga beriladi.
+app.get('/api/contents', auth, requireAppAccess, (req, res) => {
   res.json({ ok: true, contents: Contents.getAll() });
 });
 
-app.get('/api/contents/:id', (req, res) => {
+app.get('/api/contents/:id', auth, requireAppAccess, (req, res) => {
   const item = Contents.getById(req.params.id);
   if (!item) return res.status(404).json({ ok: false, error: 'Topilmadi' });
   res.json({ ok: true, content: item });
@@ -487,7 +603,16 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // Yuklangan fayllarni ("/uploads/xxx.mp4" kabi) hammaga ochiq statik
 // manzil sifatida uzatamiz — kino/rasm shu manzil orqali istalgan
 // foydalanuvchi qurilmasida ochiladi.
-app.use('/uploads', express.static(UPLOADS_DIR));
+// ESKI KOD: `app.use('/uploads', express.static(UPLOADS_DIR));` — himoyasiz.
+// Video manzilini bilgan istalgan odam barcha kinolarni to'lovsiz va
+// Telegramdan tashqarida yuklab olardi. Endi cookie/token tekshiriladi.
+app.use('/uploads', requireMediaAccess, express.static(UPLOADS_DIR, {
+  // Faylni brauzer keshlashi mumkin, lekin faqat shu foydalanuvchi uchun
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  },
+}));
 
 // Adminlar uchun: poster rasm va video fayllar
 const ALLOWED_UPLOAD_EXT = new Set([
@@ -689,7 +814,7 @@ app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
 //  PLANS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/plans', (req, res) => res.json({ ok: true, plans: Plans.getAll() }));
+app.get('/api/plans', auth, requireAppAccess, (req, res) => res.json({ ok: true, plans: Plans.getAll() }));
 
 app.post('/api/plans', auth, adminOnly, (req, res) => {
   const plan = Plans.upsert(req.body);
@@ -904,7 +1029,29 @@ app.get('/api/verify/status', (req, res) => {
   Admins.ensureEnvAdmin(user.id, { name: user.firstName, username: user.username });
   const isAdmin = Admins.isAdmin(user.id);
 
-  const token = jwt.sign({ id: user.id, username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
+  // ═══ BRAUZERDAN KIRISH FAQAT ADMINLARGA ═══
+  // Bu oqim (bot orqali kontakt tasdiqlash) Telegram Mini App TASHQARISIDA,
+  // ya'ni oddiy brauzerda ishlatiladi. Talab bo'yicha brauzerdan kirish
+  // faqat adminlarga va admin tayinlagan odamlarga ochiq — shuning uchun
+  // oddiy foydalanuvchiga token BERMAYMIZ va uni Telegramga yo'naltiramiz.
+  // (Foydalanuvchi tasdiqlangan holatida qoladi — Mini App'ni ochsa
+  // hammasi ishlaydi.)
+  if (!isAdmin) {
+    VerificationCodes.markClaimed(row.code);
+    return res.status(403).json({
+      ok: false,
+      error: 'browser_blocked',
+      message:
+        "Hisobingiz tasdiqlandi! Ammo MANYAK TV faqat Telegram ilovasi ichida " +
+        "ishlaydi — botga qaytib «MANYAK TV ni ochish» tugmasini bosingiz.",
+    });
+  }
+
+  const token = jwt.sign(
+    { id: user.id, username: user.username, isAdmin, via: 'bot' },
+    JWT_SECRET, { expiresIn: '24h' }
+  );
+  setMediaCookie(res, token);
   VerificationCodes.markClaimed(row.code);
 
   res.json({ ok: true, status: 'verified', verified: true, token, user, isAdmin });
@@ -1555,6 +1702,29 @@ app.post('/api/sync-receipt', auth, (req, res) => {
     console.error('[Sync Receipt Error]', err);
     res.status(500).json({ ok: false });
   }
+});
+
+// ─── Ommaviy (maxfiy bo'lmagan) konfiguratsiya ──────────────────────────────
+//
+// Kirish ekraniga bot manzilini ko'rsatish uchun kerak. Faqat bot USERNAME
+// beriladi — u Telegramda baribir ommaviy ma'lumot. Bot TOKENI, admin ID lari
+// va boshqa maxfiy qiymatlar bu yerda YO'Q.
+//
+// Bu endpoint auth talab qilmaydi: tashrifchi hali tizimga kirmagan bo'ladi
+// va aynan shu sababli unga botga qanday o'tishni ko'rsatish kerak.
+app.get('/api/public-config', (req, res) => {
+  let botUsername = '';
+  try {
+    botUsername = String(Settings.get().botUsername || process.env.BOT_USERNAME || '').replace('@', '');
+  } catch (err) {
+    console.error('[public-config]', err);
+  }
+  res.json({
+    ok: true,
+    botUsername: botUsername || null,
+    // Frontend shu belgi bo'yicha "Telegramda ochingiz" ekranini ko'rsatadi
+    telegramOnly: true,
+  });
 });
 
 // ─── Health ─────────────────────────────────────────────────────────────────
