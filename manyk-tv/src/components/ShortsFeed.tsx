@@ -36,7 +36,18 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
   const [dramaIndex, setDramaIndex] = useState(0);
   const [episodeIndex, setEpisodeIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
+  // ═══ AVTOMATIK O'YNATISH MOBILDA BLOKLANARDI ═══
+  // ESKI KOD: `useState(false)` — ya'ni `<video autoPlay muted={false}>`.
+  // Mobil Safari/Chrome va Telegram WebView OVOZLI avtomatik o'ynatishni
+  // BLOKLAYDI, shuning uchun feed muzlagan kadr bilan ochilardi va
+  // foydalanuvchi nima qilish kerakligini bilmasdi.
+  // Endi ovozsiz boshlanadi (brauzerlar bunga ruxsat beradi), va pastdagi
+  // effekt ovozli o'ynatishga urinib ko'radi — muvaffaqiyatsiz bo'lsa
+  // ovozsiz holatda qoladi va foydalanuvchiga "Ovozni yoqish" tugmasi
+  // ko'rsatiladi.
+  const [isMuted, setIsMuted] = useState(true);
+  // Brauzer ovozli o'ynatishni bloklagani uchun ovozsiz qolganmi?
+  const [autoplayMutedByBrowser, setAutoplayMutedByBrowser] = useState(false);
   const [liked, setLiked] = useState<Record<string, boolean>>({});
   const [showEpisodeSheet, setShowEpisodeSheet] = useState(false);
   const [showComments, setShowComments] = useState(false);
@@ -49,17 +60,69 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
 
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const currentDrama = shortDramas[dramaIndex] || shortDramas[0];
+  // ═══ INDEKSLARNI XAVFSIZ CHEGARAGA KELTIRISH ═══
+  //
+  // ESKI KOD: `shortDramas[dramaIndex] || shortDramas[0]` — drama uchun
+  // himoya bor edi, lekin `episodes[episodeIndex]` uchun YO'Q.
+  // Muammo: SSE `content_updated` xabari kelganda kontent ro'yxati
+  // yangilanadi (`syncContentFromServer`), lekin `dramaIndex` va
+  // `episodeIndex` eski qiymatda qoladi. Agar yangi ro'yxatda qismlar kam
+  // bo'lsa, `currentEpisode` `undefined` bo'lib qoladi va `hasAccess`
+  // `false` hisoblanadi — ya'ni BEPUL qism ham QULFLANGAN ko'rinadi.
+  //
+  // Endi indekslar har render'da mavjud chegaraga siqiladi (clamp).
+  const safeDramaIndex = Math.min(Math.max(dramaIndex, 0), Math.max(shortDramas.length - 1, 0));
+  const currentDrama = shortDramas[safeDramaIndex];
   const episodes = currentDrama?.episodes || [];
-  const currentEpisode: Episode | undefined = episodes[episodeIndex];
+  const safeEpisodeIndex = Math.min(Math.max(episodeIndex, 0), Math.max(episodes.length - 1, 0));
+  const currentEpisode: Episode | undefined = episodes[safeEpisodeIndex];
+
+  // Chegaradan chiqib ketgan indekslarni state'da ham tuzatamiz, aks holda
+  // "keyingi qism" tugmasi noto'g'ri joydan hisoblab ketadi.
+  useEffect(() => {
+    if (dramaIndex !== safeDramaIndex) setDramaIndex(safeDramaIndex);
+    if (episodeIndex !== safeEpisodeIndex) setEpisodeIndex(safeEpisodeIndex);
+  }, [dramaIndex, safeDramaIndex, episodeIndex, safeEpisodeIndex]);
 
   const hasAccess = currentDrama && currentEpisode
     ? checkHasAccess(user, currentDrama, currentEpisode)
     : false;
 
+  // ═══ KO'RISH SONI: faqat HAQIQATAN ochiq bo'lganda ═══
+  // ESKI KOD `hasAccess` ni tekshirmasdan `recordViewCount` chaqirardi —
+  // ya'ni qulflangan qismni ko'rmagan foydalanuvchi ham ko'rish sonini
+  // oshirardi (va har chaqiruv butun kontent massivini localStorage'ga
+  // qayta yozardi).
   useEffect(() => {
-    if (currentDrama && currentEpisode) {
-      recordViewCount(currentDrama.id, currentEpisode.id);
+    if (!currentDrama || !currentEpisode || !hasAccess) return;
+    recordViewCount(currentDrama.id, currentEpisode.id);
+  }, [currentDrama?.id, currentEpisode?.id, hasAccess]);
+
+  // ═══ TOMOSHA TARIXI: HAQIQIY progress bilan ═══
+  //
+  // ESKI KOD komponent mount bo'lishi bilanoq quyidagini yozardi:
+  //     progressSeconds: 0,
+  //     durationSeconds: 120,   // <- QATTIQ YOZILGAN, taxminiy
+  //
+  // `addWatchHistoryItem` esa `contentId + episodeId` bo'yicha dublikatni
+  // O'CHIRADI. Ya'ni foydalanuvchi to'liq pleyerda 20 daqiqa ko'rgan
+  // qismni Shorts'da bir zumda ochsa, HAQIQIY progress o'chib, uning
+  // o'rniga 0/120 yozilardi va HistoryView'dagi progress bar doim 0%
+  // ko'rsatardi.
+  //
+  // Endi tarix video elementining HAQIQIY `currentTime`/`duration` qiymati
+  // bilan va faqat haqiqatan ko'rilgan bo'lsa yoziladi.
+  useEffect(() => {
+    if (!currentDrama || !currentEpisode || !hasAccess) return;
+
+    const writeHistory = () => {
+      const el = videoRef.current;
+      if (!el) return;
+      const t = el.currentTime;
+      const d = el.duration;
+      // Faqat haqiqiy qiymatlar bo'lsa (metadata yuklangan va ko'rish boshlangan)
+      if (!Number.isFinite(t) || !Number.isFinite(d) || t <= 0 || d <= 0) return;
+
       addWatchHistoryItem(user.id, {
         contentId: currentDrama.id,
         contentTitle: currentDrama.title,
@@ -67,11 +130,18 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
         posterUrl: currentDrama.posterUrl,
         episodeId: currentEpisode.id,
         episodeNumber: currentEpisode.episodeNumber,
-        progressSeconds: 0,
-        durationSeconds: 120,
+        progressSeconds: Math.floor(t),
+        durationSeconds: Math.floor(d),
       });
-    }
-  }, [currentDrama, currentEpisode, user.id]);
+    };
+
+    const interval = setInterval(writeHistory, 5000);
+    return () => {
+      // Qismdan chiqishda oxirgi holatni ham saqlaymiz
+      writeHistory();
+      clearInterval(interval);
+    };
+  }, [currentDrama?.id, currentEpisode?.id, hasAccess, user.id]);
 
   if (!shortDramas || shortDramas.length === 0) {
     return (
@@ -89,31 +159,62 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
     );
   }
 
+  // ═══ QISM ALMASHTIRISH ═══
+  // ESKI KOD har o'tishda `setTimeout(() => videoRef.current?.play(), 100)`
+  // chaqirardi. Bu 2 sababdan noto'g'ri:
+  //   1) taymer hech qachon tozalanmaydi — komponent yopilsa yoki tez-tez
+  //      surilsa, orfan taymerlar qoladi;
+  //   2) 100ms — taxmin. Video `src` o'zgarishi bilan React DOM'ni
+  //      yangilaguncha ulgurmasligi mumkin.
+  // Endi `<video onLoadedData>` hodisasida o'ynatiladi (pastdagi
+  // `handleVideoReady`), ya'ni brauzer haqiqatan tayyor bo'lganda.
   const handleNextEpisode = () => {
-    if (episodeIndex < episodes.length - 1) {
-      setEpisodeIndex(episodeIndex + 1);
+    if (safeEpisodeIndex < episodes.length - 1) {
+      setEpisodeIndex(safeEpisodeIndex + 1);
       setIsPlaying(true);
-      setTimeout(() => videoRef.current?.play().catch(() => {}), 100);
-    } else if (dramaIndex < shortDramas.length - 1) {
-      setDramaIndex(dramaIndex + 1);
+    } else if (safeDramaIndex < shortDramas.length - 1) {
+      setDramaIndex(safeDramaIndex + 1);
       setEpisodeIndex(0);
       setIsPlaying(true);
-      setTimeout(() => videoRef.current?.play().catch(() => {}), 100);
     }
   };
 
   const handlePrevEpisode = () => {
-    if (episodeIndex > 0) {
-      setEpisodeIndex(episodeIndex - 1);
+    if (safeEpisodeIndex > 0) {
+      setEpisodeIndex(safeEpisodeIndex - 1);
       setIsPlaying(true);
-      setTimeout(() => videoRef.current?.play().catch(() => {}), 100);
-    } else if (dramaIndex > 0) {
-      setDramaIndex(dramaIndex - 1);
-      const prevEpisodes = shortDramas[dramaIndex - 1]?.episodes || [];
+    } else if (safeDramaIndex > 0) {
+      const prevEpisodes = shortDramas[safeDramaIndex - 1]?.episodes || [];
+      setDramaIndex(safeDramaIndex - 1);
       setEpisodeIndex(Math.max(0, prevEpisodes.length - 1));
       setIsPlaying(true);
-      setTimeout(() => videoRef.current?.play().catch(() => {}), 100);
     }
+  };
+
+  /**
+   * Video ma'lumoti yuklangach chaqiriladi. Avval OVOZLI o'ynatishga
+   * urinamiz; brauzer bloklasa (mobil qurilmalarda odatiy holat) — ovozsiz
+   * o'ynatib, foydalanuvchiga ovozni yoqish taklifini ko'rsatamiz.
+   */
+  const handleVideoReady = () => {
+    const el = videoRef.current;
+    if (!el || !isPlaying) return;
+
+    el.play()
+      .then(() => {
+        // Ovozli o'ynash muvaffaqiyatli bo'lsa taklif kerak emas
+        if (!el.muted) setAutoplayMutedByBrowser(false);
+      })
+      .catch(() => {
+        // Bloklandi — ovozsiz qilib qayta urinamiz
+        el.muted = true;
+        setIsMuted(true);
+        setAutoplayMutedByBrowser(true);
+        el.play().catch(() => {
+          // Bu ham ishlamasa foydalanuvchi o'zi bosadi
+          setIsPlaying(false);
+        });
+      });
   };
 
   const toggleLike = () => {
@@ -129,6 +230,10 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
   };
 
   const isLiked = Boolean(liked[`${currentDrama.id}_${currentEpisode?.id}`]);
+
+  // Narx: `price` bo'lmasa `individualPrice`, u ham bo'lmasa standart qiymat.
+  // (HomeView'dagi bilan bir xil mantiq.)
+  const fullDramaPrice = currentDrama.individualPrice || currentDrama.price || 15000;
 
   // Touch tracking variables for swiping
   const touchStartY = useRef<number | null>(null);
@@ -167,9 +272,12 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
             <video
               ref={videoRef}
               src={currentEpisode?.videoUrl || currentDrama.videoUrl}
-              autoPlay
               playsInline
               muted={isMuted}
+              // `autoPlay` atributi olib tashlandi — o'ynatishni
+              // `handleVideoReady` boshqaradi, u ovozli/ovozsiz fallback
+              // mantiqini ham bajaradi (mobilda ovozli autoplay bloklanadi).
+              onLoadedData={handleVideoReady}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
               onEnded={handleNextEpisode}
@@ -242,7 +350,16 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
                   onClick={() => onOpenPayment(currentDrama, currentEpisode)}
                   className="w-full py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 font-semibold text-xs text-zinc-300 border border-zinc-700"
                 >
-                  Dramani to'liq ochish ({currentDrama.price.toLocaleString()} so'm)
+                  {/* ESKI KOD: `currentDrama.price.toLocaleString()` —
+                    * `price` types.ts da majburiy deb belgilangan, lekin
+                    * admin formasidan yoki /api/contents dan kelgan kontentda
+                    * bo'lmasligi mumkin. Bunday holatda
+                    * "Cannot read properties of undefined (reading
+                    * 'toLocaleString')" bilan BUTUN EKRAN QULAB TUSHARDI —
+                    * aynan qulflangan qism ekranida, ya'ni to'lov qilmoqchi
+                    * bo'lgan foydalanuvchi uchun. HomeView'da bu himoya
+                    * (`item.price || 15000`) bor edi, ShortsFeed'da yo'q. */}
+                  Dramani to'liq ochish ({fullDramaPrice.toLocaleString()} so'm)
                 </button>
               </div>
             </div>
@@ -274,9 +391,34 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Brauzer ovozni bloklagan bo'lsa — aniq taklif ko'rsatamiz,
+              * aks holda foydalanuvchi videoni ovozsiz deb o'ylab qoladi. */}
+            {isMuted && autoplayMutedByBrowser && (
+              <button
+                onClick={() => {
+                  setIsMuted(false);
+                  setAutoplayMutedByBrowser(false);
+                  if (videoRef.current) {
+                    videoRef.current.muted = false;
+                    videoRef.current.play().catch(() => {});
+                  }
+                }}
+                className="px-2.5 py-1 rounded-full bg-white/95 text-zinc-950 text-[11px] font-black shadow-lg backdrop-blur-md transition active:scale-95 flex items-center gap-1"
+              >
+                <Volume2 className="w-3.5 h-3.5" />
+                <span>Ovozni yoqish</span>
+              </button>
+            )}
             <button
-              onClick={() => setIsMuted(!isMuted)}
+              onClick={() => {
+                const next = !isMuted;
+                setIsMuted(next);
+                setAutoplayMutedByBrowser(false);
+                if (videoRef.current) videoRef.current.muted = next;
+              }}
               className="p-2 rounded-full bg-black/60 backdrop-blur-md text-white border border-white/10"
+              aria-label={isMuted ? 'Ovozni yoqish' : "Ovozni o'chirish"}
+              title={isMuted ? 'Ovozni yoqish' : "Ovozni o'chirish"}
             >
               {isMuted ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4" />}
             </button>
