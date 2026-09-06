@@ -17,11 +17,34 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, 'data', 'manyktv.db');
+/**
+ * Baza joylashuvi.
+ *
+ * ═══ NEGA SOZLANADIGAN QILINDI ═══
+ * ESKI KOD: `path.join(__dirname, 'data', 'manyktv.db')` — ya'ni baza
+ * ILOVA PAPKASI ichida yaratilardi. Railway, Render, Fly va shunga o'xshash
+ * platformalarda konteyner fayl tizimi VAQTINCHALIK (ephemeral): har bir
+ * deploy yoki qayta ishga tushirishda u butunlay tozalanadi.
+ *
+ * Natijasi: har `git push` dan keyin BARCHA foydalanuvchilar, VIP obunalar,
+ * to'lov cheklari va kontent ro'yxati YO'QOLARDI.
+ *
+ * Endi `DATA_DIR` muhit o'zgaruvchisi orqali doimiy diskka (volume)
+ * ko'rsatish mumkin, masalan Railway'da volume `/data` ga ulansa:
+ *     DATA_DIR=/data
+ * Lokal ishlab chiqishda o'zgaruvchi kerak emas — eski joy ishlatiladi.
+ */
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DB_PATH = path.join(DATA_DIR, 'manyktv.db');
 
 // Ensure data directory exists
 import fs from 'fs';
-fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+// ESKI KOD bu yerda `path.join(__dirname, 'data')` ni yaratardi — ya'ni
+// `DATA_DIR` boshqa joyga ko'rsatilsa, kerakli papka YARATILMASDI va
+// server `SQLITE_CANTOPEN` bilan yiqilardi. Endi aynan DB joylashuvi
+// yaratiladi.
+fs.mkdirSync(DATA_DIR, { recursive: true });
+console.log(`[DB] Baza joylashuvi: ${DB_PATH}`);
 
 const db = new DatabaseSync(DB_PATH);
 

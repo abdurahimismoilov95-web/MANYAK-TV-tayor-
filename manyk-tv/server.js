@@ -33,6 +33,45 @@ const httpServer = createServer(app);
 
 // ─── Config ────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
+
+/**
+ * Ilovaning ommaviy manzili — Telegram webhook uchun MAJBURIY.
+ *
+ * `APP_URL` qo'lda berilmagan bo'lsa, hosting platformasi bergan domendan
+ * avtomatik aniqlaymiz. Bu bot sozlashni ancha osonlashtiradi: Railway'da
+ * domen deploy paytida beriladi, ya'ni uni oldindan `.env` ga yozib
+ * bo'lmaydi. Natijada "APP_URL yo'q -> webhook o'rnatilmadi -> bot
+ * ishlamaydi" tuzog'i o'z-o'zidan yechiladi.
+ *
+ *   RAILWAY_PUBLIC_DOMAIN  — Railway
+ *   RENDER_EXTERNAL_URL    — Render (to'liq URL ko'rinishida)
+ *   FLY_APP_NAME           — Fly.io
+ */
+function resolvePublicAppUrl() {
+  const explicit = process.env.APP_URL;
+  if (explicit && explicit.startsWith('https://')) return explicit.replace(/\/+$/, '');
+
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  }
+  if (process.env.RENDER_EXTERNAL_URL?.startsWith('https://')) {
+    return process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, '');
+  }
+  if (process.env.FLY_APP_NAME) {
+    return `https://${process.env.FLY_APP_NAME}.fly.dev`;
+  }
+
+  // https:// bo'lmagan qiymat berilgan bo'lsa — ogohlantiramiz
+  if (explicit) {
+    console.warn(`[Config] ⚠️  APP_URL "https://" bilan boshlanmaydi: ${explicit}. Telegram webhook uchun HTTPS majburiy.`);
+  }
+  return null;
+}
+
+const APP_URL = resolvePublicAppUrl();
+if (APP_URL) {
+  console.log(`[Config] Ommaviy manzil: ${APP_URL}`);
+}
 const IS_PROD = process.env.NODE_ENV === 'production';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'manyaktv_secret_2026';
@@ -73,7 +112,7 @@ app.use('/api/', apiLimiter);
 // qabul qilib, Access-Control-Allow-Credentials: true bilan birga xavfli edi
 // (boshqa domendagi zararli sayt cookie/token bilan so'rov yuborishi mumkin edi).
 // Endi FAQAT to'liq (aniq) mos kelgan origin qabul qilinadi.
-const ALLOWED_ORIGINS = new Set(['http://localhost:3000', 'http://localhost:5173', process.env.APP_URL].filter(Boolean));
+const ALLOWED_ORIGINS = new Set(['http://localhost:3000', 'http://localhost:5173', APP_URL].filter(Boolean));
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && ALLOWED_ORIGINS.has(origin)) {
@@ -386,7 +425,19 @@ app.delete('/api/contents/:id', auth, adminOnly, (req, res) => {
 // yoziladi va "/uploads/<fayl>" ko'rinishidagi doimiy manzil qaytariladi
 // — bu manzil sahifa yangilangandan keyin ham, boshqa foydalanuvchi
 // qurilmasida ham baravar ishlaydi.
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+/**
+ * Yuklangan fayllar (poster rasmlar, videolar, to'lov cheklari) joylashuvi.
+ *
+ * ═══ NEGA SOZLANADIGAN QILINDI ═══
+ * ESKI KOD: `path.join(__dirname, 'uploads')` — ilova papkasi ichida.
+ * Railway/Render kabi platformalarda konteyner fayl tizimi vaqtinchalik,
+ * ya'ni har deploy'da BARCHA YUKLANGAN VIDEOLAR VA CHEK RASMLARI
+ * yo'qolardi (kontent yozuvlari bazada qolib, videolari 404 bo'lardi).
+ *
+ * Endi doimiy diskka (volume) ko'rsatish mumkin:
+ *     UPLOADS_DIR=/data/uploads
+ */
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
@@ -1208,8 +1259,8 @@ function isBotAdmin(userId) {
 
 /** Saytni ochish tugmasi (APP_URL sozlangan bo'lsa). */
 function buildOpenAppKeyboard() {
-  const appUrl = process.env.APP_URL;
-  if (!appUrl || !appUrl.startsWith('https://')) return null;
+  const appUrl = APP_URL;
+  if (!appUrl) return null;
   return {
     inline_keyboard: [[{ text: '🎬 MANYAK TV ni ochish', web_app: { url: appUrl } }]],
   };
@@ -1315,7 +1366,7 @@ app.post('/api/broadcast', auth, adminOnly, async (req, res) => {
 
 app.post('/api/setup-webhook', auth, adminOnly, async (req, res) => {
   if (!BOT_TOKEN) return res.status(503).json({ ok: false });
-  const url = req.body.webhookUrl || `${process.env.APP_URL}/webhook`;
+  const url = req.body.webhookUrl || (APP_URL ? `${APP_URL}/webhook` : '');
   if (!url?.startsWith('https://')) return res.status(400).json({ ok: false, error: 'HTTPS kerak' });
 
   // ESKI KOD: `await fetch(...)` try/catch'siz edi. Express 4 async
@@ -1484,7 +1535,7 @@ app.get('/api/bot/status', auth, adminOnly, async (req, res) => {
   }
   const me = await tgApi('getMe', {});
   const info = await tgApi('getWebhookInfo', {});
-  const appUrl = process.env.APP_URL || null;
+  const appUrl = APP_URL || null;
   res.json({
     ok: true,
     configured: Boolean(me.ok),
@@ -1599,15 +1650,15 @@ async function setupBotWebhook() {
     return;
   }
 
-  const appUrl = process.env.APP_URL;
-  if (!appUrl || !appUrl.startsWith('https://')) {
-    console.warn('[Bot] ⚠️  APP_URL yo\'q yoki https:// bilan boshlanmaydi — webhook o\'rnatilmadi.');
-    console.warn('[Bot]    Telegram webhook uchun HTTPS majburiy. Lokal ishlab chiqishda');
-    console.warn('[Bot]    ngrok/cloudflared kabi tunnel ishlatib, APP_URL ga uning manzilini yozing.');
+  if (!APP_URL) {
+    console.warn('[Bot] ⚠️  Ommaviy HTTPS manzil aniqlanmadi — webhook o\'rnatilmadi, ya\'ni BOT ISHLAMAYDI.');
+    console.warn('[Bot]    Yechim: .env ga APP_URL="https://sizning-domeningiz" yozing.');
+    console.warn('[Bot]    (Railway/Render/Fly da domen avtomatik aniqlanadi — qo\'shimcha sozlash kerak emas.)');
+    console.warn('[Bot]    Lokal ishlab chiqishda: ngrok http 3001 va uning https manzilini yozing.');
     return;
   }
 
-  const webhookUrl = `${appUrl.replace(/\/+$/, '')}/webhook`;
+  const webhookUrl = `${APP_URL}/webhook`;
 
   // Bot haqiqatan ishlayotganini tekshiramiz (token to'g'rimi?)
   const me = await tgApi('getMe', {});
