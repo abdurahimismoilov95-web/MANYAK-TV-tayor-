@@ -40,6 +40,82 @@ const KEYS = {
   AUDIT_LOGS: 'manyak_tv_audit_logs_v1',
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  KESH MIGRATSIYASI — ESKI VERSIYADAN QOLGAN "TASDIQLANGAN" BELGISI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ═══ TUZATILGAN XATO: TASDIQLASH OYNASI UMUMAN CHIQMASDI ═══
+//
+// Ilovaning eski versiyasida `isPhoneVerified = true` KLIENT tomonida
+// yozilardi (`verifyUserPhone` / `verifyUserViaBot` — endi olib tashlangan).
+// Ya'ni saytdan ilgari foydalangan har bir kishining localStorage'ida
+// `isPhoneVerified: true` qolib ketgan.
+//
+// Yangi versiyada tasdiqlash oynasi shu shart bilan ochiladi:
+//     isOpen={isPhoneModalOpen && !user.isPhoneVerified}
+// va `refreshData()` da:
+//     if (!currentUser.isPhoneVerified) setIsPhoneModalOpen(true);
+//
+// Eski kesh `true` bo'lgani uchun oyna HECH QACHON ochilmasdi. Bu esa
+// halqaga olib kelardi:
+//     tasdiqlash oynasi chiqmaydi -> foydalanuvchi bot orqali tasdiqlamaydi
+//     -> JWT olinmaydi -> kontent saqlash, chek yuborish va admin panel
+//     ishlamaydi (hammasi 401 qaytaradi)
+//
+// Yangi tashrifchilarda muammo yo'q edi (`stored` bo'sh -> isPhoneVerified
+// false), shuning uchun bu faqat MAVJUD foydalanuvchilarda ko'rinardi —
+// jumladan saytning egasida.
+//
+// YECHIM: `isPhoneVerified` endi SERVER maydoni. Eski keshdagi qiymatga
+// ishonmaymiz: migratsiya bir marta ishlab, uni `false` ga qaytaradi.
+// Haqiqiy holat keyin serverdan (`/api/me/entitlements`) keladi — ya'ni
+// haqiqatan tasdiqlangan odam oynani qayta ko'rmaydi.
+const SCHEMA_VERSION_KEY = 'manyak_tv_schema_version';
+const CURRENT_SCHEMA_VERSION = '2';
+
+function runCacheMigrations(): void {
+  if (typeof localStorage === 'undefined') return;
+
+  try {
+    if (localStorage.getItem(SCHEMA_VERSION_KEY) === CURRENT_SCHEMA_VERSION) return;
+
+    // 1) Joriy sessiyadagi ishonchsiz "tasdiqlangan" belgisini tozalash
+    const rawCurrent = localStorage.getItem(KEYS.CURRENT_USER);
+    if (rawCurrent) {
+      const user = JSON.parse(rawCurrent);
+      if (user && user.isPhoneVerified) {
+        user.isPhoneVerified = false;
+        localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(user));
+        console.info('[Migration] Eski keshdagi tasdiqlash belgisi tozalandi — Telegram bot orqali qayta tasdiqlash so\'raladi.');
+      }
+    }
+
+    // 2) Foydalanuvchilar katalogidagi nusxalarni ham
+    const rawUsers = localStorage.getItem(KEYS.USERS);
+    if (rawUsers) {
+      const users = JSON.parse(rawUsers);
+      if (Array.isArray(users)) {
+        let changed = false;
+        for (const u of users) {
+          if (u && u.isPhoneVerified) {
+            u.isPhoneVerified = false;
+            changed = true;
+          }
+        }
+        if (changed) localStorage.setItem(KEYS.USERS, JSON.stringify(users));
+      }
+    }
+
+    localStorage.setItem(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
+  } catch (err) {
+    // Migratsiya yiqilsa ilova ishlashda davom etishi kerak
+    console.warn('[Migration] Keshni migratsiya qilishda xatolik:', err);
+  }
+}
+
+// Modul yuklanishi bilan bir marta ishlaydi (getStoredCurrentUser dan oldin)
+runCacheMigrations();
+
 // Helper for local storage
 function getItem<T>(key: string, fallback: T): T {
   try {
