@@ -51,8 +51,17 @@ function resolvePublicAppUrl() {
   const explicit = process.env.APP_URL;
   if (explicit && explicit.startsWith('https://')) return explicit.replace(/\/+$/, '');
 
+  // Railway. DIQQAT: `RAILWAY_PUBLIC_DOMAIN` faqat servisga OMMAVIY DOMEN
+  // berilgan bo'lsa mavjud bo'ladi. Domen yaratilmagan servisda Railway
+  // faqat `RAILWAY_PRIVATE_DOMAIN` beradi (u ichki tarmoq uchun, Telegram
+  // unga ulana olmaydi).
   if (process.env.RAILWAY_PUBLIC_DOMAIN) {
     return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  }
+  // Railway'ning eski o'zgaruvchisi
+  if (process.env.RAILWAY_STATIC_URL) {
+    const v = process.env.RAILWAY_STATIC_URL;
+    return v.startsWith('http') ? v.replace(/\/+$/, '') : `https://${v}`;
   }
   if (process.env.RENDER_EXTERNAL_URL?.startsWith('https://')) {
     return process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, '');
@@ -68,9 +77,43 @@ function resolvePublicAppUrl() {
   return null;
 }
 
+/**
+ * Manzil aniqlanmaganda ANIQ tashxis chiqaradi.
+ *
+ * NEGA KERAK: "Ommaviy HTTPS manzil aniqlanmadi" xabari o'z-o'zidan
+ * sababni ko'rsatmaydi — muammo APP_URL yozilmaganidami, yoki hosting
+ * domen bermaganidami, bilinmaydi. Bu qatorlar aynan nima ko'rilganini
+ * aytadi, shunda taxmin qilish kerak bo'lmaydi.
+ */
+function logAppUrlDiagnostics() {
+  const seen = [
+    'APP_URL',
+    'RAILWAY_PUBLIC_DOMAIN',
+    'RAILWAY_PRIVATE_DOMAIN',
+    'RAILWAY_STATIC_URL',
+    'RAILWAY_SERVICE_NAME',
+    'RENDER_EXTERNAL_URL',
+    'FLY_APP_NAME',
+  ].map((k) => `${k}=${process.env[k] ? process.env[k] : '(yo\'q)'}`);
+
+  console.warn('[Config] Aniqlash uchun ko\'rilgan o\'zgaruvchilar:');
+  for (const line of seen) console.warn(`[Config]   ${line}`);
+
+  // Railway'da eng ko'p uchraydigan holat: servis ichki tarmoqda ishlayapti,
+  // lekin ommaviy domen yaratilmagan.
+  if (process.env.RAILWAY_PRIVATE_DOMAIN && !process.env.RAILWAY_PUBLIC_DOMAIN) {
+    console.warn('[Config] ⚠️  SABAB ANIQ: Railway servisiga OMMAVIY DOMEN berilmagan.');
+    console.warn('[Config]    RAILWAY_PRIVATE_DOMAIN bor, RAILWAY_PUBLIC_DOMAIN yo\'q — ya\'ni servis');
+    console.warn('[Config]    faqat ichki tarmoqda ishlayapti va INTERNETDAN OCHILMAYDI.');
+    console.warn('[Config]    Yechim: Railway -> service -> Settings -> Networking -> Generate Domain');
+  }
+}
+
 const APP_URL = resolvePublicAppUrl();
 if (APP_URL) {
   console.log(`[Config] Ommaviy manzil: ${APP_URL}`);
+} else {
+  logAppUrlDiagnostics();
 }
 const IS_PROD = process.env.NODE_ENV === 'production';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
