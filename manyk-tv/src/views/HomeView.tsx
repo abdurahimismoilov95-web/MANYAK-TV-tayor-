@@ -73,6 +73,42 @@ export const HomeView: React.FC<HomeViewProps> = ({
     (item) => !activeCatalogs.some((catalog) => isContentInCatalog(item, catalog))
   );
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  YANGI QO'SHILGANLAR — tez topish uchun
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // Ilgari bosh sahifada yangi qo'shilgan kinoni topishning hech qanday
+  // yo'li yo'q edi: kontent faqat kataloglar bo'yicha guruhlanardi va
+  // katalog ichida tartib tasodifiy edi. Admin yangi kino qo'shsa,
+  // foydalanuvchi uni ko'rish uchun butun ro'yxatni ko'zdan kechirishi
+  // kerak bo'lardi.
+  //
+  // MUHIM ZAXIRA MANTIQ: `initialData.ts` dagi boshlang'ich kontentda
+  // `createdAt` maydoni UMUMAN YO'Q. Shuning uchun faqat sana bo'yicha
+  // saralasak, bu bo'lim BO'SH ko'rinardi (funksiya buzilgan deb
+  // o'ylanardi). Agar birorta elementda ham sana bo'lmasa — serverdan
+  // kelgan tartibni ishlatamiz (server `rowid DESC` qaytaradi, ya'ni eng
+  // yangisi birinchi).
+  const NEW_BADGE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000; // 14 kun
+
+  const recentlyAdded = React.useMemo(() => {
+    const parsed = contents.map((item) => {
+      const t = new Date(item.createdAt || 0).getTime();
+      return { item, created: Number.isFinite(t) ? t : 0 };
+    });
+
+    const hasAnyDate = parsed.some((p) => p.created > 0);
+    const ordered = hasAnyDate
+      ? [...parsed].sort((a, b) => b.created - a.created)
+      : parsed;
+
+    const now = Date.now();
+    return ordered.slice(0, 24).map((p) => ({
+      item: p.item,
+      isNew: p.created > 0 && now - p.created <= NEW_BADGE_WINDOW_MS,
+    }));
+  }, [contents]);
+
   // Render appropriate category icon
   const getCatalogIcon = (catalog: CatalogCategory) => {
     if (catalog.format === 'vertical_9_16' || catalog.id === 'cat_mini_drama') {
@@ -119,6 +155,23 @@ export const HomeView: React.FC<HomeViewProps> = ({
           >
             Barchasi
           </button>
+
+          {/* YANGI: "Yangi" filtri — eng yangi qo'shilganlarni bir bosishda
+            * ko'rish uchun. Kataloglardan OLDIN turadi, ya'ni ko'zga
+            * birinchi tashlanadi. */}
+          {recentlyAdded.length > 0 && (
+            <button
+              onClick={() => setSelectedCatalogId('new')}
+              className={`flex items-center gap-1 px-3 py-1 rounded-full text-[13px] font-semibold transition whitespace-nowrap ${
+                selectedCatalogId === 'new'
+                  ? 'bg-white text-black shadow-md'
+                  : 'bg-zinc-900/80 text-amber-400 hover:text-white border border-amber-800/60 hover:bg-zinc-800'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Yangi</span>
+            </button>
+          )}
 
           {activeCatalogs.map((cat) => {
             const isSelected = selectedCatalogId === cat.id;
@@ -296,6 +349,43 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </section>
       )}
 
+      {/* VIEW 0: YANGI QO'SHILGANLAR (to'liq ro'yxat) */}
+      {selectedCatalogId === 'new' && (
+        <section className="px-4 space-y-3">
+          <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+            <div>
+              <h3 className="text-lg font-black text-white flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-amber-400" />
+                <span>Yangi qo'shilganlar</span>
+              </h3>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Eng oxirida qo'shilgan kino, serial va mini dramalar
+              </p>
+            </div>
+            <span className="text-xs font-bold text-zinc-500">
+              {recentlyAdded.length} ta
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3">
+            {recentlyAdded.map(({ item, isNew }) => (
+              <div key={item.id} className="relative">
+                {isNew && (
+                  <span className="absolute top-1.5 left-1.5 z-10 text-[9px] font-black bg-amber-500 text-black px-1.5 py-0.5 rounded shadow-lg">
+                    YANGI
+                  </span>
+                )}
+                <ContentCard
+                  item={item}
+                  hasAccess={checkHasAccess(user, item)}
+                  onClick={() => onSelectContent(item)}
+                />
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* VIEW 1: Single Catalog Filtered View */}
       {selectedCatalogId !== 'all' && selectedCatalog && (
         <section className="px-4 space-y-3">
@@ -341,6 +431,47 @@ export const HomeView: React.FC<HomeViewProps> = ({
       {/* VIEW 2: All Catalogs Sections (Exact catalogs visible on screen) */}
       {selectedCatalogId === 'all' && (
         <div className="space-y-7">
+          {/* YANGI QO'SHILGANLAR — kataloglardan OLDIN, ya'ni foydalanuvchi
+            * bosh sahifani ochishi bilanoq yangi kinolarni ko'radi. */}
+          {recentlyAdded.length > 0 && (
+            <section className="px-4">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-amber-400" />
+                    <span>Yangi qo'shilganlar</span>
+                  </h3>
+                  <div className="w-8 h-0.5 bg-amber-500 rounded-full mt-0.5" />
+                </div>
+
+                <button
+                  onClick={() => setSelectedCatalogId('new')}
+                  className="text-xs text-zinc-400 hover:text-white font-medium flex items-center gap-0.5"
+                >
+                  <span>Barchasi ({recentlyAdded.length})</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 overflow-x-auto pb-2 scrollbar-none">
+                {recentlyAdded.slice(0, 12).map(({ item, isNew }) => (
+                  <div key={item.id} className="relative flex-shrink-0">
+                    {isNew && (
+                      <span className="absolute top-1.5 left-1.5 z-10 text-[9px] font-black bg-amber-500 text-black px-1.5 py-0.5 rounded shadow-lg">
+                        YANGI
+                      </span>
+                    )}
+                    <ContentCard
+                      item={item}
+                      hasAccess={checkHasAccess(user, item)}
+                      onClick={() => onSelectContent(item)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           {activeCatalogs.map((catalog) => {
             const catItems = contents.filter((item) => isContentInCatalog(item, catalog));
             if (catItems.length === 0) return null;
