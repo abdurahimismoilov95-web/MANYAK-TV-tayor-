@@ -93,7 +93,7 @@ import {
   getStoredAuditLogs,
   addAuditLog,
   resetUserHWIDBindingInStorage,
-  SUPER_ADMIN_ID,
+  getSuperAdminId,
   FULL_ADMIN_PERMISSIONS,
   DEFAULT_SUB_ADMIN_PERMISSIONS,
   isUserSuperAdmin,
@@ -102,7 +102,6 @@ import {
   saveAppointedAdmin,
   removeAppointedAdmin,
 } from '../services/storage';
-import { fetchAndProcessBotCommands } from '../services/telegramBot';
 import { getAuthHeaders } from '../services/authToken';
 
 interface AdminPanelProps {
@@ -147,6 +146,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Content edit state
   const [editingContent, setEditingContent] = useState<Partial<ContentItem> | null>(null);
   const [isContentModalOpen, setIsContentModalOpen] = useState(false);
+  // Kontent serverga saqlanayotganini ko'rsatish uchun (ilgari saqlash
+  // sinxron deb hisoblanib, tugma hech qachon bloklanmasdi va foydalanuvchi
+  // bir necha marta bosib, dublikat yaratishi mumkin edi).
+  const [isSavingContent, setIsSavingContent] = useState(false);
   const [contentFilter, setContentFilter] = useState<'all' | 'movie' | 'series' | 'anime_series' | 'short_drama'>('all');
 
   // Episodes for series/short dramas in modal
@@ -488,8 +491,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   const handleRemoveAppointedAdmin = (adminId: string, adminName: string) => {
-    if (adminId === SUPER_ADMIN_ID) {
-      alert("Bosh Admin (891846690) ni o'chirib bo'lmaydi!");
+    if (adminId === getSuperAdminId()) {
+      alert("Bosh Adminni o'chirib bo'lmaydi!");
       return;
     }
     if (
@@ -524,27 +527,87 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
-  // Handler: Sync confirmation commands from Telegram Bot
-  const handleSyncBotCommands = async () => {
+  // ═══════════════════════════════════════════════════════════════════════
+  //  BOT HOLATINI TEKSHIRISH (ilgari: brauzerdan getUpdates polling)
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // ESKI KOD `fetchAndProcessBotCommands(localSettings, ...)` ni chaqirardi,
+  // u esa BRAUZERDAN to'g'ridan-to'g'ri
+  //     api.telegram.org/bot<TOKEN>/getUpdates
+  // so'rovini yuborardi. Bu "bot ishlamayapti" muammosining sabablaridan
+  // biri edi:
+  //
+  //   1) Telegram webhook o'rnatilgan bo'lsa `getUpdates` ni RAD ETADI
+  //      (409 Conflict) — webhook va polling BIR VAQTDA ISHLAMAYDI.
+  //   2) Aksincha, brauzer polling qilib turgan bo'lsa, u serverdagi
+  //      botdan update'larni "o'g'irlab" olardi va webhook bo'sh qolardi.
+  //   3) Bot tokeni brauzerga chiqarilardi (DevTools'dan ko'rinadi).
+  //
+  // Endi bot FAQAT serverda ishlaydi (webhook orqali), tasdiqlash buyruqlari
+  // ham server tomonida bajariladi. Bu tugma esa bot ulanishini
+  // DIAGNOSTIKA qiladi — nima uchun ishlamayotganini aniq ko'rsatadi.
+  const handleCheckBotStatus = async () => {
     setIsSyncingBot(true);
     try {
-      const count = await fetchAndProcessBotCommands(
-        localSettings,
-        (receiptId) => {
-          handleReviewReceipt(receiptId, 'approved');
-        },
-        (receiptId) => {
-          handleReviewReceipt(receiptId, 'rejected');
-        }
-      );
-      if (count > 0) {
-        showNotification(`Botdan ${count} ta yangi tasdiqlash buyrug'i qabul qilindi va obuna ochildi!`);
-        onRefreshData();
-      } else {
-        showNotification("Telegram Bot tekshirildi: yangi tasdiqlash buyruqlari topilmadi.");
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('/api/bot/status', { headers: authHeaders });
+      const data = await res.json();
+
+      if (!res.ok || !data.ok) {
+        showNotification(`❌ Bot holatini olib bo'lmadi: ${data?.error || res.status}`);
+        return;
       }
+      if (!data.configured) {
+        showNotification(`❌ Bot sozlanmagan: ${data.reason || 'TELEGRAM_BOT_TOKEN yo\'q'}`);
+        return;
+      }
+
+      const wh = data.webhook;
+      if (!wh?.url) {
+        showNotification(
+          `⚠️ Bot ulandi (@${data.bot?.username}), lekin WEBHOOK O'RNATILMAGAN. ` +
+          `Serverda APP_URL to'g'ri (https://) bo'lishi kerak. Kutilgan: ${data.expectedWebhook || '—'}`
+        );
+        return;
+      }
+      if (wh.url !== data.expectedWebhook) {
+        showNotification(`⚠️ Webhook boshqa manzilga o'rnatilgan: ${wh.url}`);
+        return;
+      }
+      if (wh.lastErrorMessage) {
+        showNotification(`⚠️ Bot ulangan, lekin Telegram xato bildirdi: ${wh.lastErrorMessage}`);
+        return;
+      }
+
+      showNotification(
+        `✅ Bot ishlayapti: @${data.bot?.username} · webhook faol` +
+        (wh.pendingUpdateCount ? ` · kutilayotgan update: ${wh.pendingUpdateCount}` : '')
+      );
     } catch (e) {
-      showNotification("Bot bilan bog'lanishda xatolik. Bot tokenini sozlamalardan tekshiring.");
+      showNotification("Bot holatini tekshirishda tarmoq xatosi.");
+    } finally {
+      setIsSyncingBot(false);
+    }
+  };
+
+  // Webhookni qayta ulash (APP_URL o'zgargandan keyin foydali)
+  const handleReconnectBot = async () => {
+    setIsSyncingBot(true);
+    try {
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('/api/bot/reconnect', { method: 'POST', headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        showNotification(`❌ Qayta ulanmadi: ${data?.error || res.status}`);
+        return;
+      }
+      showNotification(
+        data.webhook?.url
+          ? `✅ Webhook qayta o'rnatildi: ${data.webhook.url}`
+          : "⚠️ Webhook o'rnatilmadi — serverda APP_URL ni tekshiring."
+      );
+    } catch {
+      showNotification("Qayta ulashda tarmoq xatosi.");
     } finally {
       setIsSyncingBot(false);
     }
@@ -626,7 +689,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   // Handler: Save content
-  const handleSaveContent = (e: React.FormEvent) => {
+  const handleSaveContent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingContent || !editingContent.title) return;
 
@@ -659,20 +722,52 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       createdAt: editingContent.createdAt || new Date().toISOString(),
     };
 
-    saveStoredContent(fullItem);
-    setIsContentModalOpen(false);
-    showNotification(`"${fullItem.title}" muvaffaqiyatli saqlandi!`);
-    onRefreshData();
+    // ═══ 1-MUAMMO: "muvaffaqiyat" xabari SERVERGA YOZILMASDAN chiqardi ═══
+    // ESKI KOD:
+    //     saveStoredContent(fullItem);            // await YO'Q
+    //     showNotification("muvaffaqiyatli saqlandi!");
+    // `saveStoredContent` natijasini kutmasdan darhol muvaffaqiyat
+    // ko'rsatilardi. Server 401/403 bilan rad etsa ham admin "saqlandi"
+    // xabarini ko'rardi, kontent esa faqat uning brauzerida qolardi —
+    // boshqa foydalanuvchilarga umuman ko'rinmasdi.
+    // Endi natija kutiladi va haqiqiy sabab ko'rsatiladi.
+    setIsSavingContent(true);
+    try {
+      const saved = await saveStoredContent(fullItem);
+      setIsContentModalOpen(false);
+      showNotification(`"${saved.title}" saqlandi va barcha foydalanuvchilarga ko'rinadi.`);
+      onRefreshData();
+    } catch (err) {
+      showNotification(
+        err instanceof Error
+          ? `❌ Saqlanmadi: ${err.message}`
+          : "❌ Kontentni saqlab bo'lmadi."
+      );
+    } finally {
+      setIsSavingContent(false);
+    }
   };
 
   // Direct content delete with confirmation & audit log
-  const handleDeleteContentDirectly = (item: ContentItem) => {
+  // ESKI KOD `deleteStoredContent(item.id)` ni await'siz chaqirib, darhol
+  // "muvaffaqiyatli o'chirildi!" deb yozardi. Server rad etsa (401/403),
+  // kontent admin ekranidan yo'qolardi, lekin BOSHQA foydalanuvchilarda
+  // qolib ketardi — ya'ni admin uni o'chirdim deb o'ylardi.
+  const handleDeleteContentDirectly = async (item: ContentItem) => {
     const isConfirmed = window.confirm(
       `"${item.title}" kontentini rostdan ham o'chirmoqchimisiz?\n\nUshbu kino/serial va uning barcha epizodlari butunlay o'chiriladi!`
     );
     if (!isConfirmed) return;
 
-    deleteStoredContent(item.id);
+    try {
+      await deleteStoredContent(item.id);
+    } catch (err) {
+      showNotification(
+        err instanceof Error ? `❌ O'chirilmadi: ${err.message}` : "❌ Kontentni o'chirib bo'lmadi."
+      );
+      return;
+    }
+
     addAuditLog({
       adminId: currentUser.id,
       adminName: `${currentUser.firstName} ${currentUser.lastName || ''}`.trim() || `Admin #${currentUser.id}`,
@@ -685,7 +780,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     });
     setAuditLogs(getStoredAuditLogs());
     onRefreshData();
-    showNotification(`"${item.title}" muvaffaqiyatli o'chirildi!`);
+    showNotification(`"${item.title}" barcha foydalanuvchilarda o'chirildi.`);
   };
 
   // Device file upload helper for poster & video
@@ -1104,7 +1199,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               {isSuperAdmin ? (
                 <span className="text-[10px] bg-gradient-to-r from-amber-500/20 to-yellow-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                   <Crown className="w-3 h-3 text-amber-400" />
-                  <span>Bosh Admin (891846690)</span>
+                  <span>Bosh Admin</span>
                 </span>
               ) : (
                 <span className="text-[10px] bg-blue-950 text-blue-300 border border-blue-800 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
@@ -1514,7 +1609,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     required
                     value={manualTelegramId}
                     onChange={(e) => setManualTelegramId(e.target.value)}
-                    placeholder="Telegram ID raqami (masalan: 891846690)"
+                    placeholder="Telegram ID raqami"
                     className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white font-mono outline-none focus:border-amber-500"
                   />
                 </div>
@@ -1602,7 +1697,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-mono font-black text-sm text-white flex items-center gap-1.5">
                               <span>ID: {u.id}</span>
-                              {u.id === '891846690' && (
+                              {u.id === getSuperAdminId() && (
                                 <span className="bg-red-600 text-white text-[9px] px-1.5 py-0.2 rounded font-bold uppercase">
                                   Bosh Admin
                                 </span>
@@ -1849,15 +1944,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2 w-full sm:w-auto">
+                    {/* Ilgari bu tugma brauzerdan `getUpdates` polling
+                      * qilardi (webhook bilan konflikt). Endi bot serverda
+                      * ishlaydi va tasdiqlashlar real-time keladi — bu tugma
+                      * esa bot ulanishini tekshiradi. */}
                     <button
                       type="button"
-                      onClick={handleSyncBotCommands}
+                      onClick={handleCheckBotStatus}
                       disabled={isSyncingBot}
                       className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition border border-zinc-700 disabled:opacity-50"
-                      title="Telegram botdan yangi tasdiq xabarlarini tekshirish"
+                      title="Telegram bot ulanishini tekshirish"
                     >
                       <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isSyncingBot ? 'animate-spin' : ''}`} />
-                      <span>{isSyncingBot ? "Tekshirilmoqda..." : "Botdan tekshirish"}</span>
+                      <span>{isSyncingBot ? "Tekshirilmoqda..." : "Bot holati"}</span>
                     </button>
 
                     <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-xl border border-zinc-800 overflow-x-auto">
@@ -2104,17 +2203,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     </div>
                   </div>
 
-                  {/* Sync Button */}
-                  <div className="pt-2">
+                  {/* Bot diagnostikasi.
+                    * ESKI TUGMA brauzerdan `getUpdates` polling qilardi va
+                    * bu webhook bilan to'qnashardi (Telegram 409 Conflict) —
+                    * "bot ishlamayapti" muammosining sabablaridan biri.
+                    * Endi bot serverda webhook orqali ishlaydi; bu bo'lim
+                    * esa ulanish holatini ko'rsatadi va kerak bo'lsa
+                    * webhookni qayta o'rnatadi. */}
+                  <div className="pt-2 space-y-2">
                     <button
                       type="button"
-                      onClick={handleSyncBotCommands}
+                      onClick={handleCheckBotStatus}
                       disabled={isSyncingBot}
                       className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition"
                     >
                       <RefreshCw className={`w-4 h-4 ${isSyncingBot ? 'animate-spin' : ''}`} />
-                      <span>{isSyncingBot ? "Bot buyruqlari tekshirilmoqda..." : "Telegram Botdan Tasdiqlash Buyruqlarini Tekshirish"}</span>
+                      <span>{isSyncingBot ? "Tekshirilmoqda..." : "Bot Ulanishini Tekshirish (holat va webhook)"}</span>
                     </button>
+
+                    <button
+                      type="button"
+                      onClick={handleReconnectBot}
+                      disabled={isSyncingBot}
+                      className="w-full py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 font-bold text-xs flex items-center justify-center gap-2 border border-zinc-700 transition"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSyncingBot ? 'animate-spin' : ''}`} />
+                      <span>Webhookni Qayta O'rnatish</span>
+                    </button>
+
+                    <p className="text-[11px] text-zinc-500 leading-relaxed">
+                      Bot serverda <b>webhook</b> orqali ishlaydi. Ishlashi uchun serverdagi
+                      <code className="mx-1 px-1 rounded bg-zinc-900 text-zinc-300">.env</code>
+                      faylida <b>TELEGRAM_BOT_TOKEN</b> va <b>APP_URL</b> (https:// bilan)
+                      to'g'ri bo'lishi shart.
+                    </p>
                   </div>
                 </div>
               </div>
@@ -2533,21 +2655,25 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 <h4 className="text-xs font-bold text-white uppercase tracking-wider text-red-400">
                   Telegram Bot Rekvizitlari
                 </h4>
-                <div>
-                  <label className="block text-xs text-zinc-300 mb-1">
-                    Bot Token (Asosiy):
-                  </label>
-                  <input
-                    type="text"
-                    value={localSettings.botToken}
-                    onChange={(e) =>
-                      setLocalSettings({ ...localSettings, botToken: e.target.value })
-                    }
-                    className="w-full font-mono bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-red-500"
-                  />
-                  <span className="text-[10px] text-zinc-500 mt-1 block">
-                    Bot tokenini @BotFather dan oling va .env faylga TELEGRAM_BOT_TOKEN sifatida saqlang
-                  </span>
+                {/* ═══ BOT TOKEN MAYDONI OLIB TASHLANDI ═══
+                  * Ilgari bu yerda bot tokenini kiritish mumkin edi va u
+                  * `settings.botToken` ga, ya'ni HAR BIR foydalanuvchining
+                  * brauzeriga (`GET /api/settings` orqali admin sozlamalari
+                  * bilan) tushardi. Bot tokeni esa botni to'liq boshqarish
+                  * huquqini beradi.
+                  * Endi token FAQAT serverdagi `.env` faylida
+                  * (TELEGRAM_BOT_TOKEN) va brauzerga hech qachon chiqmaydi. */}
+                <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800">
+                  <div className="text-[11px] text-zinc-300 leading-relaxed">
+                    <b className="text-amber-400">Bot tokeni bu yerda saqlanmaydi.</b>
+                    <br />
+                    Xavfsizlik uchun token faqat serverdagi
+                    <code className="mx-1 px-1 rounded bg-zinc-900 text-zinc-300">.env</code>
+                    faylida turadi:
+                    <code className="mx-1 px-1 rounded bg-zinc-900 text-emerald-400">TELEGRAM_BOT_TOKEN</code>.
+                    Bot ulanishini quyidagi "To'lov / Bot" bo'limidagi
+                    <b> Bot Ulanishini Tekshirish </b> tugmasi bilan sinab ko'rishingiz mumkin.
+                  </div>
                 </div>
 
                 <div>
@@ -2752,24 +2878,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-zinc-300 mb-1">
-                      Telegram Bot Token:
-                    </label>
-                    <input
-                      type="text"
-                      value={localSettings.telegramBotToken || '8554246830:AAHTg1Qx_E2jQ1j1_example'}
-                      onChange={(e) =>
-                        setLocalSettings({
-                          ...localSettings,
-                          telegramBotToken: e.target.value,
-                        })
-                      }
-                      placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-                      className="w-full font-mono bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-emerald-400 outline-none focus:border-emerald-500"
-                    />
-                  </div>
-
+                  {/* Ikkinchi bot token maydoni ham olib tashlandi. Uning
+                    * standart qiymati kod ichida yozilgan namunali token edi
+                    * (`8554246830:AAHTg1Qx_E2jQ1j1_example`) — bu chalkashlik
+                    * tug'dirardi: admin bu yerga haqiqiy token yozsa, u
+                    * brauzerga chiqib ketardi, lekin server baribir `.env`
+                    * dagi tokendan foydalanardi. */}
                   <div>
                     <label className="block text-xs text-zinc-300 mb-1">
                       Bot Havolasi / Username:
@@ -2804,7 +2918,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       className="bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded-lg text-xs font-mono text-zinc-200 flex items-center gap-1.5"
                     >
                       <span>{id}</span>
-                      {id !== '891846690' && (
+                      {id !== getSuperAdminId() && (
                         <button
                           type="button"
                           onClick={() => {
@@ -2974,7 +3088,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   <span>Adminlar & Huquqlar Boshqaruvi (RBAC)</span>
                 </h3>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Bosh Admin (891846690) xohlagan foydalanuvchiga cheklangan adminlik huquqini bera oladi va nazorat qiladi
+                  Bosh Admin xohlagan foydalanuvchiga cheklangan adminlik huquqini bera oladi va nazorat qiladi
                 </p>
               </div>
 
@@ -3001,7 +3115,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       Bosh Admin (Tizim Egasi)
                     </span>
                     <span className="text-[11px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full font-bold">
-                      ID: {SUPER_ADMIN_ID}
+                      ID: {getSuperAdminId() || '—'}
                     </span>
                     <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.5 rounded-full font-bold">
                       100% To'liq Huquq
@@ -3034,7 +3148,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               <div className="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800">
                 <div className="text-zinc-400 text-xs font-semibold">Bosh Admin</div>
                 <div className="text-xl font-black text-amber-400 mt-1">1 ta</div>
-                <div className="text-[10px] text-amber-400/80 mt-0.5">Cheklovlarsiz (891846690)</div>
+                <div className="text-[10px] text-amber-400/80 mt-0.5">Cheklovlarsiz</div>
               </div>
 
               <div className="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800">
@@ -3093,7 +3207,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     );
                   })
                   .map((admin) => {
-                    const isTargetSuper = admin.id === SUPER_ADMIN_ID;
+                    const isTargetSuper = admin.id === getSuperAdminId();
                     const perms = admin.permissions || DEFAULT_SUB_ADMIN_PERMISSIONS;
 
                     return (
@@ -3835,9 +3949,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-3 px-4 rounded-xl bg-red-600 hover:bg-red-500 font-bold text-sm text-white shadow-lg shadow-red-600/30 transition"
+                disabled={isSavingContent}
+                className="w-full py-3 px-4 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-60 disabled:hover:bg-red-600 font-bold text-sm text-white shadow-lg shadow-red-600/30 transition flex items-center justify-center gap-2"
               >
-                Saqlash
+                {isSavingContent ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Serverga saqlanmoqda…</span>
+                  </>
+                ) : (
+                  <span>Saqlash</span>
+                )}
               </button>
             </form>
           </div>
@@ -4654,7 +4776,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       >
                         <option value="">-- Mavjud foydalanuvchilardan tanlash --</option>
                         {usersList
-                          .filter((u) => u.id !== SUPER_ADMIN_ID)
+                          .filter((u) => u.id !== getSuperAdminId())
                           .map((u) => (
                             <option key={u.id} value={u.id}>
                               {u.firstName} {u.lastName || ''} (ID: {u.id})

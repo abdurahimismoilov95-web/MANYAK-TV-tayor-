@@ -4,7 +4,7 @@ import { BottomNav, NavTab } from './components/BottomNav';
 import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { ContentDetailsModal } from './components/ContentDetailsModal';
 import { PaymentModal } from './components/PaymentModal';
-import { PhoneVerificationModal } from './components/PhoneVerificationModal';
+import { TelegramVerificationModal } from './components/TelegramVerificationModal';
 import { TelegramAuthModal } from './components/TelegramAuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -340,6 +340,20 @@ export default function App() {
         // Admin kino/serial qo'shsa, tahrirlasa yoki o'chirsa — ro'yxatni
         // serverdan qayta so'rab, hammaning ekranida bir xil holat bo'ladi.
         void syncContentFromServer();
+      } else if (data.type === 'verification_complete') {
+        // Foydalanuvchi Telegram botga kontaktini yubordi va server uni
+        // tasdiqladi. `isPhoneVerified` server tomonida boshqarilgani uchun
+        // entitlement'ni qayta tortamiz — tasdiqlash modali avtomatik yopiladi.
+        void syncEntitlementsFromServer().then(() => {
+          refreshData();
+          setIsPhoneModalOpen(false);
+        });
+        setPaymentToast({
+          id: String(Date.now()),
+          type: 'success',
+          title: '✅ Hisob tasdiqlandi',
+          message: 'Telegram akkauntingiz muvaffaqiyatli bog\'landi.',
+        });
       }
     };
 
@@ -820,8 +834,10 @@ export default function App() {
         onSuccess={refreshData}
       />
 
-      {/* One-Time Phone Verification Modal */}
-      <PhoneVerificationModal
+      {/* Telegram bot orqali hisobni tasdiqlash
+        * (ilgari bu telefon raqami orqali tasdiqlash edi — qarang
+        * TelegramVerificationModal ustidagi izoh) */}
+      <TelegramVerificationModal
         user={user}
         isOpen={isPhoneModalOpen && !user.isPhoneVerified}
         onVerified={(updated) => {

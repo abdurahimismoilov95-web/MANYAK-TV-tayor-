@@ -94,7 +94,7 @@ export interface HWIDBindingRecord {
 }
 
 export interface UserProfile {
-  id: string; // Telegram ID as string, e.g. "891846690"
+  id: string; // Telegram ID (satr ko'rinishida)
   username?: string;
   firstName: string;
   lastName?: string;
@@ -226,7 +226,7 @@ export interface AppointedAdmin {
   name: string;
   username?: string;
   roleTitle: string; // e.g. "Bosh Admin", "Kontent Moderatori", "Kassir"
-  isSuperAdmin: boolean; // true faqat Bosh Admin (891846690) uchun - 100% cheklovlarsiz
+  isSuperAdmin: boolean; // true faqat Bosh Admin uchun - 100% cheklovlarsiz
   permissions: AdminPermissions;
   appointedAt: string;
   appointedBy?: string;
@@ -239,7 +239,7 @@ export interface SystemSettings {
   telegramBotToken?: string;
   telegramChannelUrl: string;
   adminContactUrl: string;
-  adminTelegramIds: string[]; // default includes "891846690"
+  adminTelegramIds: string[]; // .env SUPER_ADMIN_ID / ADMIN_IDS dan keladi
   appointedAdmins?: AppointedAdmin[]; // Role-based Access Control (RBAC)
   secondaryAdminPassword?: string; // Secondary master PIN or password for dangerous actions (default: '8918')
   cardPayment: {

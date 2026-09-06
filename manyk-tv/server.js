@@ -855,6 +855,15 @@ app.get('/api/me/entitlements', auth, (req, res) => {
       isPhoneVerified: Boolean(user.isPhoneVerified),
       isBanned: Boolean(user.isBanned),
       isAdmin: Boolean(req.user.isAdmin),
+      isSuperAdmin: Admins.isSuperAdmin(user.id),
+
+      // 4-MUAMMO: Bosh admin ID si ilgari frontend bundle'ida QATTIQ
+      // YOZILGAN edi (`export const SUPER_ADMIN_ID = '891846690'`), ya'ni
+      // istalgan odam kimning egasi ekanini bilib olardi. Endi bu qiymat
+      // FAQAT adminning o'ziga qaytariladi — oddiy foydalanuvchi `null`
+      // oladi va uning interfeysida hech qanday admin ma'lumoti yo'q.
+      superAdminId: req.user.isAdmin ? String(SUPER_ADMIN_ID) : null,
+
       syncedAt: new Date().toISOString(),
     },
   });
