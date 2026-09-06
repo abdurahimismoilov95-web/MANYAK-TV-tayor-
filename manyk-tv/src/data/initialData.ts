@@ -91,8 +91,61 @@ export const INITIAL_SETTINGS: SystemSettings = {
     checkUpload: true,
     clickPayme: false,
   },
-  availableGenres: [],
-  catalogs: [],
+  availableGenres: [
+    'Jangari', 'Drama', 'Komediya', 'Fantastika', 'Triller',
+    'Romantik', 'Detektiv', 'Sarguzasht', 'Anime', 'Short Drama',
+  ],
+
+  // ═══ BO'SH BOSH EKRAN MUAMMOSI TUZATILDI ═══
+  //
+  // ESKI QIYMAT: `catalogs: []`
+  //
+  // HomeView bosh sahifadagi BARCHA bo'limlarni aynan `settings.catalogs`
+  // dan yasaydi (`activeCatalogs.map(...)`). Katalog ro'yxati bo'sh bo'lsa —
+  // kontent bazada BOR bo'lsa ham — bosh sahifa BUTUNLAY BO'SH ko'rinardi.
+  // Yangi o'rnatishda yoki brauzer keshi tozalangandan keyin foydalanuvchi
+  // hech narsa ko'rmasdi va ilovani tashlab ketardi.
+  //
+  // Bu quyidagi ID'lar HomeView dagi `isContentInCatalog()` funksiyasida
+  // allaqachon qattiq yozilgan — ya'ni asl loyihada aynan shu 4 ta katalog
+  // bo'lgan (fayl `.gitignore` xatosi tufayli yo'qolgan, yuqoridagi izohga
+  // qarang). Shuning uchun ularni standart qiymat sifatida tiklaymiz.
+  // Admin panelda ularni tahrirlash/o'chirish mumkin.
+  catalogs: [
+    {
+      id: 'cat_kino',
+      name: 'Kinolar',
+      description: 'Jahon va milliy premyera filmlar',
+      format: 'standard',
+      order: 1,
+      isVisible: true,
+    },
+    {
+      id: 'cat_mini_drama',
+      name: 'Mini Dramalar',
+      description: 'Vertikal formatdagi qisqa dramalar',
+      format: 'vertical_9_16',
+      order: 2,
+      isVisible: true,
+      badge: 'YANGI',
+    },
+    {
+      id: 'cat_drama',
+      name: 'Seriallar',
+      description: 'Ko\'p qismli seriallar va dramalar',
+      format: 'standard',
+      order: 3,
+      isVisible: true,
+    },
+    {
+      id: 'cat_anime',
+      name: 'Anime',
+      description: 'Anime seriallar va filmlar',
+      format: 'standard',
+      order: 4,
+      isVisible: true,
+    },
+  ],
   bannedUserIds: [],
   bannedDeviceTokens: [],
 };

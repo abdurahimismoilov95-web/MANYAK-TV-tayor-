@@ -810,6 +810,20 @@ const DEFAULT_SETTINGS = {
     bankName: 'Uzcard / Humo',
     instructions: "Kartaga to'lov qiling va chekni yuklang",
   },
+
+  // ═══ BO'SH BOSH EKRAN MUAMMOSI ═══
+  // Bu ro'yxat ilgari DEFAULT_SETTINGS da UMUMAN YO'Q edi, ya'ni
+  // `GET /api/settings` katalogsiz javob qaytarardi. Frontend esa bosh
+  // sahifadagi barcha bo'limlarni aynan shu ro'yxatdan yasaydi — natijada
+  // kontent bazada bor bo'lsa ham bosh sahifa bo'sh ko'rinardi.
+  // ID'lar frontenddagi `isContentInCatalog()` bilan mos bo'lishi shart.
+  catalogs: [
+    { id: 'cat_kino', name: 'Kinolar', description: 'Jahon va milliy premyera filmlar', format: 'standard', order: 1, isVisible: true },
+    { id: 'cat_mini_drama', name: 'Mini Dramalar', description: 'Vertikal formatdagi qisqa dramalar', format: 'vertical_9_16', order: 2, isVisible: true, badge: 'YANGI' },
+    { id: 'cat_drama', name: 'Seriallar', description: "Ko'p qismli seriallar va dramalar", format: 'standard', order: 3, isVisible: true },
+    { id: 'cat_anime', name: 'Anime', description: 'Anime seriallar va filmlar', format: 'standard', order: 4, isVisible: true },
+  ],
+
   bannedUserIds: [],
   bannedDeviceTokens: [],
 };
