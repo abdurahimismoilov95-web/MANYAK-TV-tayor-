@@ -141,9 +141,57 @@ export default function App() {
     setReceipts(getStoredReceipts());
     const currentUser = getStoredCurrentUser();
     setUser(currentUser);
-    if (!currentUser.isPhoneVerified) {
-      setIsPhoneModalOpen(true);
+    // ═══ TUZATILGAN XATO: TASDIQLASH QAYTA-QAYTA SO'RALARDI ═══
+    //
+    // ESKI KOD shu yerda turgan edi:
+    //     if (!currentUser.isPhoneVerified) setIsPhoneModalOpen(true);
+    //
+    // `refreshData()` esa faqat ilova ochilganda emas, BALKI:
+    //   - har 'manyak_storage_update' hodisasida (kesh har yozilganda),
+    //   - har 60 sekundlik entitlement sinxronizatsiyasida,
+    //   - chek/to'lov holati o'zgarganda,
+    //   - foydalanuvchi tortib yangilaganda
+    // chaqiriladi. Ya'ni foydalanuvchi oynani YOPSA HAM keyingi
+    // `refreshData()` uni DARHOL QAYTA OCHARDI — cheksiz bezovta qilish.
+    //
+    // Bundan tashqari kesh boshida hamisha `isPhoneVerified: false` bo'ladi
+    // (haqiqiy holat serverdan keladi), shuning uchun ALLAQACHON tasdiqlagan
+    // foydalanuvchida ham oyna ochilib ketardi.
+    //
+    // Endi qaror faqat SERVER javobiga qarab, bitta joyda va sessiyada
+    // BIR MARTA qabul qilinadi — pastdagi `maybePromptVerification()`.
+  }, []);
+
+  // ═══ TASDIQLASHNI SO'RASH: FAQAT SERVER "TASDIQLANMAGAN" DESA ═══
+  //
+  // Talab: bir marta tasdiqlangan foydalanuvchidan boshqa hech qachon
+  // so'ralmasin (hatto botni o'chirib tashlab, qayta /start bosgan
+  // bo'lsa ham). `isPhoneVerified` serverda (SQLite) saqlanadi va
+  // `SERVER_OWNED_USER_FIELDS` ro'yxatida — klient uni o'zgartira olmaydi.
+  // Shuning uchun yagona ishonchli manba — server javobi.
+  //
+  // Muhim: token bo'lmasa yoki tarmoq yo'q bo'lsa (`ent === null`) oyna
+  // OCHILMAYDI. Aks holda oflayn foydalanuvchi tasdiqlangan bo'lsa ham
+  // bezovta qilinardi.
+  const verifyPromptShownRef = React.useRef(false);
+
+  const maybePromptVerification = useCallback((ent: { isPhoneVerified: boolean } | null) => {
+    // `ent === null` — token yo'q yoki tarmoq uzilgan, ya'ni serverdagi
+    // holat NOMA'LUM. Bunday paytda so'ramaymiz: aks holda tasdiqlagan
+    // foydalanuvchi oflaynda ham qulflanib qolardi.
+    if (!ent) return;
+
+    if (ent.isPhoneVerified) {
+      // Tasdiqlangan — boshqa hech qachon so'ralmaydi.
+      verifyPromptShownRef.current = true;
+      setIsPhoneModalOpen(false);
+      return;
     }
+
+    // Tasdiqlanmagan — sessiyada faqat BIR MARTA ko'rsatamiz.
+    if (verifyPromptShownRef.current) return;
+    verifyPromptShownRef.current = true;
+    setIsPhoneModalOpen(true);
   }, []);
 
   useEffect(() => {
@@ -416,12 +464,18 @@ export default function App() {
     const entitlementInterval = setInterval(() => {
       void syncEntitlementsFromServer().then((ent) => {
         if (ent) refreshData();
+        // Server "tasdiqlangan" desa — oyna yopiladi. "Tasdiqlanmagan" desa
+        // ham qayta bezovta qilmaydi (sessiyada bir marta ko'rsatilgan).
+        maybePromptVerification(ent);
       });
     }, 60000);
 
-    // Ilova ochilganda darhol bir marta
+    // Ilova ochilganda darhol bir marta.
+    // Tasdiqlash oynasini ochish/ochmaslik qarori SHU YERDA — ya'ni
+    // serverdagi haqiqiy holat ma'lum bo'lgandan keyin qabul qilinadi.
     void syncEntitlementsFromServer().then((ent) => {
       if (ent) refreshData();
+      maybePromptVerification(ent);
     });
 
     // Kesh yozilmasa (masalan xotira to'lgan) foydalanuvchini ogohlantiramiz

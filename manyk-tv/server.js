@@ -1317,6 +1317,20 @@ async function handleTelegramUpdate(update) {
   //  4) ADMIN BUYRUQLARI
   // ═══════════════════════════════════════════════════════════════════════
   if (!isBotAdmin(from)) {
+    // ESKI KOD har qanday matnga "Tasdiqlash uchun /start buyrug'ini
+    // yuboring" deb javob berardi — ALLAQACHON TASDIQLAGAN foydalanuvchiga
+    // ham. Bu esa "yana tasdiqlash kerakmi?" degan chalkashlik tug'dirardi.
+    // Endi tasdiqlangan odamga tasdiqlash haqida gapirmaymiz, to'g'ridan-
+    // to'g'ri ilovaga kirish tugmasini beramiz.
+    if (Users.getById(from)?.isPhoneVerified) {
+      await tgSend(chat, [
+        '✅ Hisobingiz tasdiqlangan — qayta tasdiqlash kerak emas.',
+        '',
+        'Pastdagi tugma orqali ilovani oching.',
+      ].join('\n'), buildOpenAppKeyboard());
+      return;
+    }
+
     // Oddiy foydalanuvchiga tushunarli javob (ilgari mutlaq sukunat edi)
     await tgSend(chat, [
       "ℹ️ Bu bot MANYAK TV hisobingizni tasdiqlash uchun.",
@@ -1368,6 +1382,12 @@ async function handleContactVerification(message, from, chat) {
   const normalizedPhone = phone.startsWith('+') ? phone : `+${phone}`;
 
   // Profilni sinxronlab, keyin tasdiqlaymiz
+  // Bu foydalanuvchi ILGARI tasdiqlanganmi? (kontaktni ikkinchi marta
+  // yuborgan bo'lishi mumkin). Tasdiqlash o'zi idempotent, lekin quyida
+  // adminlarga TAKRORIY "yangi foydalanuvchi tasdiqlandi" xabari
+  // yuborilmasligi uchun buni oldindan bilishimiz kerak.
+  const wasAlreadyVerified = Boolean(Users.getById(from)?.isPhoneVerified);
+
   Users.syncTelegramProfile(message.from);
   const user = Users.verifyByContact(from, normalizedPhone);
   if (!user) {
@@ -1399,6 +1419,10 @@ async function handleContactVerification(message, from, chat) {
       ? '👑 Sizga <b>administrator</b> huquqi berildi.'
       : '🎬 Endi saytda barcha imkoniyatlardan foydalanishingiz mumkin.',
   ].filter(Boolean).join('\n'), buildOpenAppKeyboard());
+
+  // Takroriy kontaktda adminlarni bezovta qilmaymiz — foydalanuvchi
+  // allaqachon ro'yxatda bo'lgan, "yangi" emas.
+  if (wasAlreadyVerified) return;
 
   // Adminlarga xabar (faqat adminlarga — oddiy foydalanuvchilar ko'rmaydi)
   const adminReport = [
@@ -2004,6 +2028,42 @@ verifyCleanupTimer.unref?.();
 //    brauzerga chiqarardi va server botidan update'larni "o'g'irlardi".
 //    O'sha kod endi butunlay olib tashlandi (frontend commitiga qarang).
 //
+/**
+ * Botning pastdagi DOIMIY menyu tugmasini "ilovani ochish" ga o'zgartiradi.
+ *
+ * ═══ NEGA KERAK ═══
+ * Ilgari ilovaga kirish uchun yagona yo'l — bot yuborgan xabardagi inline
+ * tugma edi. Foydalanuvchi suhbatni tozalasa yoki xabar tarixda ko'milib
+ * ketsa, ilovaga qanday kirishni bilmasdi va yana `/start` yozishga
+ * majbur bo'lardi.
+ *
+ * `setChatMenuButton` (chat_id BERILMAGANDA) BARCHA foydalanuvchilar uchun
+ * standart menyu tugmasini o'rnatadi: xabar yozish maydonining chap
+ * tomonida doimiy "🎬 MANYAK TV" tugmasi paydo bo'ladi va u ilovani
+ * Telegram ICHIDA ochadi.
+ *
+ * MUHIM: buni ilgari faqat @BotFather orqali QO'LDA sozlash mumkin deb
+ * hisoblanardi. Bot API'da usul bor, shuning uchun server ishga tushganda
+ * avtomatik o'rnatiladi — qo'lda hech narsa qilish kerak emas.
+ */
+async function setupBotMenuButton() {
+  if (!BOT_TOKEN || !APP_URL) return;
+
+  const res = await tgApi('setChatMenuButton', {
+    menu_button: {
+      type: 'web_app',
+      text: '🎬 MANYAK TV',
+      web_app: { url: APP_URL },
+    },
+  });
+
+  if (res.ok) {
+    console.log(`[Bot] ✅ Doimiy menyu tugmasi o'rnatildi -> ${APP_URL}`);
+  } else {
+    console.warn(`[Bot] ⚠️  Menyu tugmasi o'rnatilmadi: ${res.description || 'noma\'lum xatolik'}`);
+  }
+}
+
 // Endi server ishga tushganda webhook AVTOMATIK ro'yxatdan o'tadi.
 async function setupBotWebhook() {
   if (!BOT_TOKEN) {
@@ -2039,6 +2099,12 @@ async function setupBotWebhook() {
   } catch (err) {
     console.error('[Bot] Username saqlanmadi:', err);
   }
+
+  // DOIMIY "ILOVANI OCHISH" TUGMASI — pastdagi izohga qarang.
+  // Webhook tekshiruvidan OLDIN chaqiriladi, chunki quyida webhook
+  // allaqachon to'g'ri bo'lsa funksiya `return` qiladi va menyu tugmasi
+  // umuman o'rnatilmay qolardi.
+  await setupBotMenuButton();
 
   // Mavjud webhook allaqachon to'g'ri bo'lsa qayta o'rnatmaymiz
   const info = await tgApi('getWebhookInfo', {});
