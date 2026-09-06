@@ -27,7 +27,7 @@ import {
   isFavorite,
   toggleFavorite,
   recordViewCount,
-  useAccessTokenToUnlock,
+  spendTokenToUnlock,
 } from '../services/storage';
 import { useNetworkQuality, VideoQuality } from '../hooks/useNetworkQuality';
 
@@ -61,6 +61,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [showEpisodeSheet, setShowEpisodeSheet] = useState(false);
   const [swipeNotice, setSwipeNotice] = useState<string | null>(null);
   const [selectedQuality, setSelectedQuality] = useState<'Auto' | VideoQuality>('Auto');
+  // Token bilan qism ochilgandan keyin video elementi DOM'da paydo bo'lishini
+  // kutib, so'ng avtomatik o'ynatish uchun belgi.
+  const [autoPlayAfterUnlock, setAutoPlayAfterUnlock] = useState(false);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [, setForceRender] = useState(false);
   const autoQuality = useNetworkQuality();
@@ -136,6 +139,20 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const hasAccess = content
     ? checkHasAccess(user, content, currentEpisode || undefined)
     : false;
+
+  // Token bilan ochilgandan keyin: video elementi DOM'ga chiqishi bilan
+  // avtomatik o'ynatamiz. `hasAccess` false bo'lganda `<video>` render
+  // qilinmaydi, shuning uchun `onClick` ichida play() chaqirish ishlamaydi.
+  useEffect(() => {
+    if (!autoPlayAfterUnlock || !hasAccess) return;
+    const el = videoRef.current;
+    if (!el) return;
+    el.play().catch(() => {
+      // Brauzer avtomatik o'ynatishni bloklasa — foydalanuvchi o'zi bosadi
+      setIsPlaying(false);
+    });
+    setAutoPlayAfterUnlock(false);
+  }, [autoPlayAfterUnlock, hasAccess]);
 
   // Track history correctly without constantly resetting the interval
   const timeRef = useRef({ currentTime: 0, duration: 0 });
@@ -515,21 +532,30 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            const res = useAccessTokenToUnlock(
+                            // Token sarflash endi SERVER tomonida (async).
+                            void spendTokenToUnlock(
                               user.id,
                               content.id,
                               content.title,
                               currentEpisode?.id,
                               currentEpisode?.title
-                            );
-                            if (res.success) {
-                              setIsPlaying(true);
-                              if (videoRef.current) {
-                                videoRef.current.play().catch(() => {});
+                            ).then((res) => {
+                              if (!res.success) {
+                                alert(res.message);
+                                return;
                               }
-                            } else {
-                              alert(res.message);
-                            }
+                              // MUHIM: bu yerda `videoRef.current` hali `null`,
+                              // chunki hozir QULFLANGAN ekran render qilingan
+                              // va `<video>` elementi DOM'da yo'q. ESKI KOD
+                              // shu yerda `videoRef.current.play()` chaqirardi
+                              // va u jimgina hech narsa qilmasdi.
+                              // Entitlement keshga yozilgach, App qayta render
+                              // qiladi va video elementi paydo bo'ladi —
+                              // avtomatik o'ynatishni shundan keyin
+                              // `autoPlayAfterUnlock` effekti bajaradi.
+                              setIsPlaying(true);
+                              setAutoPlayAfterUnlock(true);
+                            });
                           }}
                           className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 font-extrabold text-xs text-zinc-950 shadow-lg shadow-amber-600/30 transition flex items-center justify-center gap-2"
                         >

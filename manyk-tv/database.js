@@ -17,11 +17,34 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, 'data', 'manyktv.db');
+/**
+ * Baza joylashuvi.
+ *
+ * ═══ NEGA SOZLANADIGAN QILINDI ═══
+ * ESKI KOD: `path.join(__dirname, 'data', 'manyktv.db')` — ya'ni baza
+ * ILOVA PAPKASI ichida yaratilardi. Railway, Render, Fly va shunga o'xshash
+ * platformalarda konteyner fayl tizimi VAQTINCHALIK (ephemeral): har bir
+ * deploy yoki qayta ishga tushirishda u butunlay tozalanadi.
+ *
+ * Natijasi: har `git push` dan keyin BARCHA foydalanuvchilar, VIP obunalar,
+ * to'lov cheklari va kontent ro'yxati YO'QOLARDI.
+ *
+ * Endi `DATA_DIR` muhit o'zgaruvchisi orqali doimiy diskka (volume)
+ * ko'rsatish mumkin, masalan Railway'da volume `/data` ga ulansa:
+ *     DATA_DIR=/data
+ * Lokal ishlab chiqishda o'zgaruvchi kerak emas — eski joy ishlatiladi.
+ */
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DB_PATH = path.join(DATA_DIR, 'manyktv.db');
 
 // Ensure data directory exists
 import fs from 'fs';
-fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+// ESKI KOD bu yerda `path.join(__dirname, 'data')` ni yaratardi — ya'ni
+// `DATA_DIR` boshqa joyga ko'rsatilsa, kerakli papka YARATILMASDI va
+// server `SQLITE_CANTOPEN` bilan yiqilardi. Endi aynan DB joylashuvi
+// yaratiladi.
+fs.mkdirSync(DATA_DIR, { recursive: true });
+console.log(`[DB] Baza joylashuvi: ${DB_PATH}`);
 
 const db = new DatabaseSync(DB_PATH);
 
@@ -33,16 +56,59 @@ db.exec('PRAGMA busy_timeout = 5000;');
 // node:sqlite'da better-sqlite3'dagi db.transaction() yordamchisi yo'q —
 // shu yordamchi funksiya bilan xuddi shu xatti-harakatni takrorlaymiz.
 function transaction(fn) {
-  return (items) => {
-    db.exec('BEGIN');
+  return (items) => inTransaction(() => fn(items));
+}
+
+/**
+ * JSON matnni xavfsiz o'qiydi — buzilgan bo'lsa `fallback` qaytaradi.
+ *
+ * SABAB: DB qatlamida `JSON.parse(row.data)` o'nlab joyda try/catch'siz
+ * ishlatilgan edi. Bitta buzilgan yoki yarim yozilgan `data` blob'i
+ * (masalan disk to'lib qolganda, yoki DB qo'lda tahrirlanganda)
+ * `GET /api/users`, `/api/contents`, `/api/plans` ni BARCHA qatorlar uchun
+ * 500 qilardi. `Settings.get()` esa boot paytida chaqiriladi — ya'ni
+ * buzilgan sozlama qatori serverning umuman ishga tushmasligiga olib kelardi.
+ */
+function safeJsonParse(raw, fallback, context = 'JSON') {
+  if (raw == null || raw === '') return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed == null ? fallback : parsed;
+  } catch (err) {
+    console.error(`[DB] ${context} o'qib bo'lmadi (buzilgan JSON), standart qiymat ishlatilmoqda:`, err.message);
+    return fallback;
+  }
+}
+
+/**
+ * Berilgan funksiyani bitta SQLite tranzaksiyasi ichida bajaradi va
+ * NATIJASINI qaytaradi.
+ *
+ * ESKI `transaction()` da 2 ta muammo bor edi:
+ *  1) faqat bitta `items` argumenti bilan ishlaydi va qaytariladigan
+ *     qiymatni yo'qotadi — shuning uchun "o'qi → o'zgartir → yoz" turidagi
+ *     mantiq (VIP berish, token sarflash) uchun mos emas edi va amalda
+ *     hech qayerda ishlatilmagan;
+ *  2) `catch` blokida `db.exec('ROLLBACK')` shartsiz chaqiriladi — agar
+ *     tranzaksiya umuman ochilmagan bo'lsa (BEGIN ning o'zi yiqilgan
+ *     bo'lsa), ROLLBACK ham xato tashlaydi va HAQIQIY xatoni yashiradi.
+ */
+function inTransaction(fn) {
+  db.exec('BEGIN IMMEDIATE');
+  let result;
+  try {
+    result = fn();
+  } catch (err) {
     try {
-      fn(items);
-      db.exec('COMMIT');
-    } catch (err) {
       db.exec('ROLLBACK');
-      throw err;
+    } catch (rollbackErr) {
+      // Asl xatoni yashirmaslik uchun faqat jurnalga yozamiz
+      console.error('[DB] ROLLBACK ham muvaffaqiyatsiz:', rollbackErr);
     }
-  };
+    throw err;
+  }
+  db.exec('COMMIT');
+  return result;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -171,6 +237,28 @@ db.exec(`
     created_at TEXT NOT NULL
   );
 
+  -- ═══════════════════════════════════════════════════════════════════
+  --  TELEGRAM BOT ORQALI TASDIQLASH (telefon tasdiqlash o'rniga)
+  -- ═══════════════════════════════════════════════════════════════════
+  -- Foydalanuvchi saytni Telegram Mini App tashqarisida (oddiy brauzerda)
+  -- ochsa, server uning KIM ekanini bilmaydi. Shu sababli qisqa muddatli
+  -- bir martalik kod ishlatiladi:
+  --   1) sayt POST /api/verify/start -> kod + deep link oladi
+  --   2) foydalanuvchi https://t.me/BOT?start=KOD manzilini ochadi
+  --   3) bot kontakt so'raydi, foydalanuvchi kontaktini yuboradi
+  --   4) server kontaktni tekshirib, kodni shu Telegram ID ga bog'laydi
+  --   5) sayt GET /api/verify/status?code=KOD orqali JWT va profilni oladi
+  CREATE TABLE IF NOT EXISTS verification_codes (
+    code TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | awaiting_contact | verified | expired
+    telegram_id TEXT,                        -- kod bog'langan Telegram ID
+    chat_id TEXT,                            -- bot suhbati (kontakt so'rash uchun)
+    phone TEXT,
+    created_at TEXT NOT NULL,
+    verified_at TEXT,
+    claimed_at TEXT                          -- sayt tokenni olib ketgan vaqt
+  );
+
   CREATE TABLE IF NOT EXISTS banned_devices (
     device_token TEXT PRIMARY KEY,
     banned_at TEXT NOT NULL
@@ -193,6 +281,23 @@ if (!process.env.SUPER_ADMIN_ID) {
   console.warn('[SECURITY WARNING] SUPER_ADMIN_ID .env faylda topilmadi! Standart qiymat vaqtincha ishlatilmoqda — buni albatta o\'zgartiring.');
 }
 const SUPER_ADMIN_ID = process.env.SUPER_ADMIN_ID || '891846690';
+
+/**
+ * `.env` dagi `ADMIN_IDS` (vergul bilan ajratilgan Telegram ID lar).
+ *
+ * Bu ro'yxatdagi ID egasi ro'yxatdan o'tishi bilanoq AVTOMATIK admin bo'ladi
+ * (qarang `Admins.isAdmin` va `Admins.ensureEnvAdmin`). Ilgari bu qiymat
+ * faqat botdagi tasdiqlash buyruqlari uchun o'qilardi, web admin paneli esa
+ * uni butunlay e'tiborsiz qoldirardi.
+ */
+const ENV_ADMIN_IDS = String(process.env.ADMIN_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+if (ENV_ADMIN_IDS.length > 0) {
+  console.log(`[Admin] .env ADMIN_IDS: ${ENV_ADMIN_IDS.join(', ')}`);
+}
 
 export const Users = {
   getById(id) {
@@ -253,6 +358,72 @@ export const Users = {
     db.prepare('UPDATE users SET hwid_binding = NULL, device_token = NULL WHERE id = ?').run(userId);
   },
 
+  /**
+   * Telegram profil ma'lumotlarini bazaga sinxronlaydi.
+   *
+   * TALAB: "saytdagi foydalanuvchi ID'si Telegram ID bilan bir xil bo'lsin,
+   * username ham Telegramdagidek bo'lsin — agar foydalanuvchi Telegramda
+   * username'ini o'zgartirsa, saytdagi ham avtomatik o'zgarishi kerak".
+   *
+   * Shu funksiya foydalanuvchi bot bilan har qanday aloqada bo'lganda
+   * (webhook) va Mini App orqali kirganda (`/api/auth/verify`) chaqiriladi —
+   * ya'ni username har safar Telegram'dagi HAQIQIY qiymatga tenglashtiriladi.
+   *
+   * `id` — HAR DOIM Telegram ID (`from.id`), boshqa hech qanday ID sxemasi
+   * ishlatilmaydi.
+   */
+  syncTelegramProfile(tgUser) {
+    const id = String(tgUser.id);
+    const existing = this.getById(id);
+    const now = new Date().toISOString();
+
+    // Telegram'da username o'chirilgan bo'lishi mumkin (undefined) — bunda
+    // bazadagi qiymatni ham bo'shatamiz, aks holda eski username "muzlab"
+    // qolardi va sayt Telegram bilan mos kelmasdi.
+    const username = tgUser.username != null ? String(tgUser.username) : '';
+
+    if (!existing) {
+      const isAdmin = Admins.isAdmin(id);
+      const created = {
+        id,
+        firstName: tgUser.first_name || `Foydalanuvchi #${id}`,
+        lastName: tgUser.last_name || '',
+        username,
+        isVip: isAdmin,
+        vipExpiresAt: isAdmin ? new Date(Date.now() + 365 * 86400000).toISOString() : null,
+        purchasedContentIds: [],
+        accessTokens: 0,
+        createdAt: now,
+        lastLoginAt: now,
+      };
+      this.upsert(created);
+      return this.getById(id);
+    }
+
+    existing.firstName = tgUser.first_name || existing.firstName;
+    existing.lastName = tgUser.last_name != null ? tgUser.last_name : existing.lastName;
+    existing.username = username;
+    existing.lastLoginAt = now;
+    this.upsert(existing);
+    return this.getById(id);
+  },
+
+  /**
+   * Telegram kontakti orqali foydalanuvchini tasdiqlaydi (telefon
+   * tasdiqlash o'rniga). `isPhoneVerified` SERVER tomonidan boshqariladigan
+   * maydon — shuning uchun uni faqat shu yerda, botdan kelgan HAQIQIY
+   * kontakt asosida o'rnatamiz.
+   */
+  verifyByContact(userId, phone) {
+    const id = String(userId);
+    const user = this.getById(id);
+    if (!user) return null;
+    user.phone = phone || user.phone || null;
+    user.isPhoneVerified = true;
+    this.upsert(user);
+    return this.getById(id);
+  },
+
   expireSubscriptions() {
     const now = new Date().toISOString();
     return db.prepare("UPDATE users SET is_vip = 0 WHERE is_vip = 1 AND vip_expires_at IS NOT NULL AND vip_expires_at <= ?").run(now);
@@ -303,14 +474,14 @@ function rowToUser(r) {
     isPhoneVerified: Boolean(r.is_phone_verified),
     isVip: Boolean(r.is_vip),
     vipExpiresAt: r.vip_expires_at,
-    purchasedContentIds: JSON.parse(r.purchased_content_ids || '[]'),
+    purchasedContentIds: safeJsonParse(r.purchased_content_ids, [], `users.purchased_content_ids (id=${r.id})`),
     deviceToken: r.device_token,
     accessTokens: r.access_tokens || 0,
-    unlockedEpisodeIds: JSON.parse(r.unlocked_episode_ids || '[]'),
+    unlockedEpisodeIds: safeJsonParse(r.unlocked_episode_ids, [], `users.unlocked_episode_ids (id=${r.id})`),
     vipDiscountPercent: r.vip_discount_percent || 0,
     bonusBalance: r.bonus_balance || 0,
-    dailyCheckIn: JSON.parse(r.daily_checkin || '{}'),
-    hwidBinding: r.hwid_binding ? JSON.parse(r.hwid_binding) : undefined,
+    dailyCheckIn: safeJsonParse(r.daily_checkin, {}, `users.daily_checkin (id=${r.id})`),
+    hwidBinding: r.hwid_binding ? safeJsonParse(r.hwid_binding, undefined, `users.hwid_binding (id=${r.id})`) : undefined,
     isBanned: Boolean(r.is_banned),
     banReason: r.ban_reason,
     isDeviceBanned: Boolean(r.is_device_banned),
@@ -340,11 +511,26 @@ export const Receipts = {
     return db.prepare('SELECT * FROM receipts WHERE user_id = ? ORDER BY created_at DESC').all(userId);
   },
 
+  /**
+   * Yangi chekni bazaga yozadi.
+   *
+   * ═══ TUZATILGAN XATO: BU FUNKSIYA HECH QACHON ISHLAMAGAN ═══
+   * Bind qilinadigan obyektda `reviewed_at` va `reviewed_by` maydonlari bor
+   * edi, lekin INSERT iborasida bunday nomlangan parametrlar YO'Q.
+   * node:sqlite qat'iy: iborada ishlatilmagan nomlangan parametr uzatilsa
+   *   `Unknown named parameter 'reviewed_at'`
+   * xatosini tashlaydi. Ya'ni `POST /api/receipts` HAR DOIM 500 qaytargan.
+   * (Frontend `/api/sync-receipt` dan foydalangani uchun bu sezilmagan.)
+   * Endi bind obyekti INSERT ustunlari bilan aynan bir xil.
+   */
   submit(data) {
     const id = `rcpt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const receipt = {
+
+    // DIQQAT: bu obyektning kalitlari pastdagi INSERT dagi @nomlar bilan
+    // BIR XIL bo'lishi shart — ortiqcha kalit ham xato tashlaydi.
+    const row = {
       id,
-      user_id: data.userId,
+      user_id: String(data.userId),
       user_name: data.userName || '',
       user_phone: data.userPhone || null,
       type: data.type,
@@ -352,15 +538,13 @@ export const Receipts = {
       plan_name: data.planName || null,
       content_id: data.contentId || null,
       content_title: data.contentTitle || null,
-      amount: data.amount || 0,
-      discount_applied: data.discountApplied || 0,
+      amount: Number(data.amount) || 0,
+      discount_applied: Number(data.discountApplied) || 0,
       promo_code_used: data.promoCodeUsed || null,
       receipt_image_url: data.receiptImageUrl || null,
       notes: data.notes || null,
       status: 'pending',
       created_at: new Date().toISOString(),
-      reviewed_at: null,
-      reviewed_by: null,
     };
 
     db.prepare(`
@@ -370,36 +554,84 @@ export const Receipts = {
       VALUES (@id, @user_id, @user_name, @user_phone, @type, @plan_id, @plan_name,
         @content_id, @content_title, @amount, @discount_applied, @promo_code_used,
         @receipt_image_url, @notes, @status, @created_at)
-    `).run(receipt);
+    `).run(row);
 
-    return receipt;
+    // Chaqiruvchiga to'liq chek qatorini qaytaramiz (ko'rilmagan holatda)
+    return { ...row, reviewed_at: null, reviewed_by: null };
   },
 
+  /**
+   * Chekni ko'rib chiqadi (tasdiqlaydi yoki rad etadi) va tasdiqlangan
+   * holatda foydalanuvchiga entitlement (VIP yoki kontent) beradi.
+   *
+   * Qaytaradi: { receipt, alreadyReviewed }
+   *   - `receipt`         — chek qatori (topilmasa `null`)
+   *   - `alreadyReviewed` — chek ILGARI ko'rib chiqilgan bo'lsa `true`;
+   *                         bu holda HECH QANDAY entitlement berilmaydi.
+   *
+   * ═══ TUZATILGAN 3 TA XATO ═══
+   *
+   * 1) IDEMPOTENT EMAS EDI → VIP IKKI MARTA BERILARDI.
+   *    Ilgari `WHERE status = 'pending'` sharti ham, oldingi statusni
+   *    tekshirish ham yo'q edi. Telegram inline tugmasi ikki marta bosilsa
+   *    yoki Telegram update'ni qayta yetkazsa, `Users.grantVip` yana
+   *    ishlardi — u esa muddatni mavjud muddat USTIGA qo'shadi. Ya'ni bir
+   *    marta to'lagan odam ikki barobar VIP olardi.
+   *    Endi status atomik ravishda faqat 'pending' dan o'zgartiriladi va
+   *    `changes === 0` bo'lsa (ya'ni allaqachon ko'rilgan) darhol qaytadi.
+   *
+   * 2) TRANZAKSIYA YO'Q EDI.
+   *    Chek 'approved' deb belgilanib, keyin `grantVip` yiqilsa — chek
+   *    tasdiqlangan, lekin obuna berilmagan holat qolardi (pul olingan,
+   *    xizmat berilmagan). Endi ikkisi bitta tranzaksiyada.
+   *
+   * 3) VIP MUDDATI HAR DOIM 30 KUN EDI.
+   *    `plan?.duration_days` o'qilardi, lekin `Plans.getById` JSON
+   *    blob'ini qaytaradi va u camelCase (`durationDays`) — `Plans.upsert`
+   *    aynan `plan.durationDays` ni saqlaydi. Ya'ni `duration_days` DOIM
+   *    `undefined` bo'lib, `|| 30` ishlab ketardi: 365 kunlik tarif sotib
+   *    olgan mijozga ham 30 kun berilardi.
+   */
   review(receiptId, reviewerId, decision) {
-    const now = new Date().toISOString();
-    db.prepare('UPDATE receipts SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ?')
-      .run(decision, now, reviewerId, receiptId);
+    return inTransaction(() => {
+      const existing = this.getById(receiptId);
+      if (!existing) return { receipt: null, alreadyReviewed: false };
 
-    const receipt = this.getById(receiptId);
+      const now = new Date().toISOString();
 
-    // Tasdiqlanganda — foydalanuvchiga VIP yoki kontent berish
-    if (decision === 'approved' && receipt) {
-      if (receipt.type === 'vip_subscription') {
-        const plan = Plans.getById(receipt.plan_id);
-        const days = plan?.duration_days || 30;
-        Users.grantVip(receipt.user_id, days);
-      } else if (receipt.type === 'single_content' && receipt.content_id) {
-        const user = Users.getById(receipt.user_id);
-        if (user) {
-          if (!user.purchasedContentIds.includes(receipt.content_id)) {
-            user.purchasedContentIds.push(receipt.content_id);
-            Users.upsert(user);
+      // Atomik holat o'zgartirish: faqat 'pending' bo'lsa o'zgaradi.
+      const result = db.prepare(
+        "UPDATE receipts SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = 'pending'"
+      ).run(decision, now, reviewerId, receiptId);
+
+      if (result.changes === 0) {
+        // Boshqa admin (yoki takroriy bosish) allaqachon ko'rib chiqqan.
+        return { receipt: existing, alreadyReviewed: true };
+      }
+
+      const receipt = this.getById(receiptId);
+
+      // Tasdiqlanganda — foydalanuvchiga VIP yoki kontent berish
+      if (decision === 'approved') {
+        if (receipt.type === 'vip_subscription') {
+          const plan = Plans.getById(receipt.plan_id);
+          // camelCase (JSON blob) va snake_case (ustun) — ikkisini ham
+          // qabul qilamiz, shunda eski yozuvlar ham to'g'ri ishlaydi.
+          const days = Number(plan?.durationDays ?? plan?.duration_days) || 30;
+          Users.grantVip(receipt.user_id, days);
+        } else if (receipt.type === 'single_content' && receipt.content_id) {
+          const user = Users.getById(receipt.user_id);
+          if (user) {
+            if (!user.purchasedContentIds.includes(receipt.content_id)) {
+              user.purchasedContentIds.push(receipt.content_id);
+              Users.upsert(user);
+            }
           }
         }
       }
-    }
 
-    return receipt;
+      return { receipt, alreadyReviewed: false };
+    });
   },
 
   pendingCount() {
@@ -418,22 +650,61 @@ export const Receipts = {
 export const Contents = {
   getAll() {
     return db.prepare('SELECT * FROM contents ORDER BY rowid DESC').all()
-      .map(r => ({ ...JSON.parse(r.data), id: r.id }));
+      .map(r => ({ ...safeJsonParse(r.data, {}, `contents.data (id=${r.id})`), id: r.id }));
   },
 
   getById(id) {
     const row = db.prepare('SELECT * FROM contents WHERE id = ?').get(id);
-    return row ? { ...JSON.parse(row.data), id: row.id } : null;
+    return row ? { ...safeJsonParse(row.data, {}, `contents.data (id=${row.id})`), id: row.id } : null;
   },
 
+  /**
+   * Kontentni qo'shadi yoki yangilaydi.
+   *
+   * ═══ TUZATILGAN XATO: id YO'Q BO'LSA DB BUZILARDI ═══
+   * Server `POST /api/contents` da `req.body` ni to'g'ridan-to'g'ri uzatadi
+   * va `id` YARATMAYDI. Natijada:
+   *  - `id: null` bo'lsa — SQLite'da TEXT PRIMARY KEY bir nechta NULL
+   *    qiymatga ruxsat beradi, ya'ni `ON CONFLICT(id)` HECH QACHON ishlamaydi:
+   *    har "tahrirlash" yangi DUBLIKAT qator yaratadi va `getAll()`
+   *    `id: null` bo'lgan elementlar qaytaradi (frontendda kalitlar buziladi);
+   *  - `id` umuman bo'lmasa — `undefined` bind → `ERR_INVALID_ARG_TYPE` → 500.
+   * Xuddi shu holat `title` (NOT NULL) uchun ham amal qiladi.
+   * Endi id yo'q bo'lsa serverning o'zi barqaror id yaratadi.
+   */
   upsert(content) {
-    const { id, title, type, ...rest } = content;
+    if (!content || typeof content !== 'object') {
+      throw new Error('Kontent obyekti majburiy');
+    }
+
+    const title = typeof content.title === 'string' ? content.title.trim() : '';
+    if (!title) throw new Error('Kontent sarlavhasi (title) majburiy');
+
+    const type = content.type || 'movie';
+
+    // id bo'lmasa — sarlavhadan o'qiladigan (slug) id yasaymiz
+    let id = content.id != null ? String(content.id).trim() : '';
+    if (!id) {
+      const slug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9\u0400-\u04FF]+/gi, '-')   // lotin, raqam va kirill saqlanadi
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40);
+      id = `${slug || 'content'}-${Date.now().toString(36)}`;
+    }
+
+    // `data` blob'i ichidagi id ham qator id si bilan bir xil bo'lishi kerak,
+    // aks holda `getAll()` ikkisini ustma-ust qo'yganda chalkashlik chiqadi.
+    const normalized = { ...content, id, title, type };
+    const json = JSON.stringify(normalized);
+
     db.prepare(`
       INSERT INTO contents (id, title, type, data)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET title = ?, type = ?, data = ?
-    `).run(id, title, type, JSON.stringify(content), title, type, JSON.stringify(content));
-    return content;
+    `).run(id, title, type, json, title, type, json);
+
+    return normalized;
   },
 
   delete(id) {
@@ -465,12 +736,12 @@ export const Contents = {
 export const Plans = {
   getAll() {
     return db.prepare('SELECT * FROM plans WHERE is_active = 1 ORDER BY price ASC').all()
-      .map(r => ({ ...JSON.parse(r.data), id: r.id }));
+      .map(r => ({ ...safeJsonParse(r.data, {}, `plans.data (id=${r.id})`), id: r.id }));
   },
 
   getById(id) {
     const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(id);
-    return row ? { ...JSON.parse(row.data), id: row.id } : null;
+    return row ? { ...safeJsonParse(row.data, {}, `plans.data (id=${row.id})`), id: row.id } : null;
   },
 
   upsert(plan) {
@@ -509,18 +780,65 @@ export const Plans = {
 // ══════════════════════════════════════════════════════════════════
 
 export const PromoCodes = {
+  /**
+   * Promokodni FAQAT TEKSHIRADI — hisobni oshirmaydi.
+   *
+   * ESKI KODDA XATO: `validate` chaqirilishi bilanoq
+   * `current_uses = current_uses + 1` bajarilardi. Buning 2 ta oqibati:
+   *  a) `/api/promo/validate` autentifikatsiyasiz edi, ya'ni istalgan odam
+   *     shu endpointni tsiklda chaqirib, promokodning butun limitini
+   *     bekorga tugatib qo'yishi mumkin edi;
+   *  b) kodni kiritib, keyin to'lovni bekor qilgan foydalanuvchi ham
+   *     limitdan bitta "yeb" ketardi.
+   * Endi hisob faqat HAQIQIY xarid paytida `consume()` bilan oshiriladi.
+   */
   validate(code) {
-    const row = db.prepare('SELECT * FROM promo_codes WHERE code = ? AND is_active = 1').get(code.toUpperCase());
-    if (!row) return { valid: false, message: 'Promokod topilmadi yoki muddati tugagan.' };
-    if (row.max_uses > 0 && row.current_uses >= row.max_uses) {
-      return { valid: false, message: 'Bu promokod ishlatish limiti tugagan.' };
+    if (typeof code !== 'string' || !code.trim()) {
+      return { valid: false, message: 'Promokod kiritilmadi.' };
     }
+    const row = db.prepare('SELECT * FROM promo_codes WHERE code = ? AND is_active = 1').get(code.trim().toUpperCase());
+    if (!row) return { valid: false, message: 'Promokod topilmadi yoki muddati tugagan.' };
+
+    // Muddat tekshiruvi limitdan OLDIN — foydalanuvchiga aniqroq xabar beradi
     if (row.expires_at && new Date(row.expires_at) < new Date()) {
       return { valid: false, message: 'Bu promokodning muddati tugagan.' };
     }
-    // Increment usage
-    db.prepare('UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = ?').run(code.toUpperCase());
-    return { valid: true, discountPercent: row.discount_percent, message: `${row.discount_percent}% chegirma qo'llanildi!` };
+    if (row.max_uses > 0 && row.current_uses >= row.max_uses) {
+      return { valid: false, message: 'Bu promokod ishlatish limiti tugagan.' };
+    }
+
+    return {
+      valid: true,
+      discountPercent: row.discount_percent,
+      message: `${row.discount_percent}% chegirma qo'llanildi!`,
+    };
+  },
+
+  /**
+   * Promokodni HAQIQATAN sarflaydi (xarid tasdiqlangan paytda chaqiriladi).
+   * Limitni atomik ravishda oshiradi — poyga holatida (race condition)
+   * limitdan oshib ketmasligi uchun `WHERE` shartiga limit ham qo'shilgan.
+   */
+  consume(code) {
+    if (typeof code !== 'string' || !code.trim()) return { ok: false, message: 'Promokod kiritilmadi.' };
+    const normalized = code.trim().toUpperCase();
+
+    return inTransaction(() => {
+      const check = this.validate(normalized);
+      if (!check.valid) return { ok: false, message: check.message };
+
+      const result = db.prepare(`
+        UPDATE promo_codes
+        SET current_uses = current_uses + 1
+        WHERE code = ? AND is_active = 1
+          AND (max_uses <= 0 OR current_uses < max_uses)
+      `).run(normalized);
+
+      if (result.changes === 0) {
+        return { ok: false, message: 'Bu promokod ishlatish limiti tugagan.' };
+      }
+      return { ok: true, discountPercent: check.discountPercent };
+    });
   },
 
   getAll() {
@@ -528,14 +846,23 @@ export const PromoCodes = {
   },
 
   create(data) {
+    // ESKI KOD: `data.code.toUpperCase()` — `code` bo'lmasa TypeError,
+    // `discountPercent` bo'lmasa `undefined` bind xatosi (500).
+    if (typeof data?.code !== 'string' || !data.code.trim()) {
+      throw new Error('Promokod (code) majburiy');
+    }
+    const discount = Number(data.discountPercent);
+    if (!Number.isFinite(discount) || discount <= 0 || discount > 100) {
+      throw new Error('discountPercent 1..100 oralig\'ida bo\'lishi kerak');
+    }
     db.prepare(`
       INSERT INTO promo_codes (code, discount_percent, max_uses, expires_at, is_active)
       VALUES (?, ?, ?, ?, 1)
-    `).run(data.code.toUpperCase(), data.discountPercent, data.maxUses || 100, data.expiresAt || null);
+    `).run(data.code.trim().toUpperCase(), discount, Number(data.maxUses) || 100, data.expiresAt || null);
   },
 
   delete(code) {
-    db.prepare('UPDATE promo_codes SET is_active = 0 WHERE code = ?').run(code);
+    db.prepare('UPDATE promo_codes SET is_active = 0 WHERE code = ?').run(String(code || '').toUpperCase());
   },
 };
 
@@ -611,6 +938,20 @@ const DEFAULT_SETTINGS = {
     bankName: 'Uzcard / Humo',
     instructions: "Kartaga to'lov qiling va chekni yuklang",
   },
+
+  // ═══ BO'SH BOSH EKRAN MUAMMOSI ═══
+  // Bu ro'yxat ilgari DEFAULT_SETTINGS da UMUMAN YO'Q edi, ya'ni
+  // `GET /api/settings` katalogsiz javob qaytarardi. Frontend esa bosh
+  // sahifadagi barcha bo'limlarni aynan shu ro'yxatdan yasaydi — natijada
+  // kontent bazada bor bo'lsa ham bosh sahifa bo'sh ko'rinardi.
+  // ID'lar frontenddagi `isContentInCatalog()` bilan mos bo'lishi shart.
+  catalogs: [
+    { id: 'cat_kino', name: 'Kinolar', description: 'Jahon va milliy premyera filmlar', format: 'standard', order: 1, isVisible: true },
+    { id: 'cat_mini_drama', name: 'Mini Dramalar', description: 'Vertikal formatdagi qisqa dramalar', format: 'vertical_9_16', order: 2, isVisible: true, badge: 'YANGI' },
+    { id: 'cat_drama', name: 'Seriallar', description: "Ko'p qismli seriallar va dramalar", format: 'standard', order: 3, isVisible: true },
+    { id: 'cat_anime', name: 'Anime', description: 'Anime seriallar va filmlar', format: 'standard', order: 4, isVisible: true },
+  ],
+
   bannedUserIds: [],
   bannedDeviceTokens: [],
 };
@@ -622,7 +963,7 @@ export const Settings = {
       db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify(DEFAULT_SETTINGS));
       return { ...DEFAULT_SETTINGS };
     }
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(row.data) };
+    return { ...DEFAULT_SETTINGS, ...safeJsonParse(row.data, {}, 'settings.data') };
   },
 
   update(partial) {
@@ -643,7 +984,7 @@ export const Admins = {
       .map(r => ({
         id: r.id, name: r.name, username: r.username,
         roleTitle: r.role_title, isSuperAdmin: Boolean(r.is_super_admin),
-        permissions: JSON.parse(r.permissions), appointedAt: r.appointed_at,
+        permissions: safeJsonParse(r.permissions, {}, `appointed_admins.permissions (id=${r.id})`), appointedAt: r.appointed_at,
         appointedBy: r.appointed_by,
       }));
   },
@@ -667,19 +1008,70 @@ export const Admins = {
     return true;
   },
 
+  /**
+   * Foydalanuvchi admin ekanini aniqlaydi.
+   *
+   * ═══ TUZATILGAN XATO: .env ADMIN_IDS HISOBGA OLINMASDI ═══
+   * ESKI KOD faqat `SUPER_ADMIN_ID` va `appointed_admins` jadvalini
+   * tekshirardi. Ya'ni `.env` faylga `ADMIN_IDS=123,456` deb yozish web
+   * admin paneli uchun HECH NARSA BERMASDI — u faqat botdagi
+   * `/approve_` buyruqlari uchun ishlardi (server.js). Natijada
+   * ".env dagi ID egasi ro'yxatdan o'tsa avtomatik admin bo'lsin" degan
+   * talab bajarilmasdi.
+   *
+   * Endi 3 ta manba tekshiriladi:
+   *   1) `SUPER_ADMIN_ID` (.env)
+   *   2) `ADMIN_IDS` (.env, vergul bilan)
+   *   3) `appointed_admins` jadvali (admin panel orqali tayinlanganlar)
+   */
   isAdmin(userId) {
-    if (userId === SUPER_ADMIN_ID) return true;
-    return Boolean(db.prepare('SELECT 1 FROM appointed_admins WHERE id = ?').get(userId));
+    const id = String(userId || '').trim();
+    if (!id) return false;
+    if (id === SUPER_ADMIN_ID) return true;
+    if (ENV_ADMIN_IDS.includes(id)) return true;
+    return Boolean(db.prepare('SELECT 1 FROM appointed_admins WHERE id = ?').get(id));
   },
 
   isSuperAdmin(userId) {
-    return userId === SUPER_ADMIN_ID;
+    return String(userId || '').trim() === SUPER_ADMIN_ID;
+  },
+
+  /**
+   * `.env` da ko'rsatilgan adminni `appointed_admins` jadvaliga yozadi.
+   *
+   * Bu ikki narsa uchun kerak:
+   *   - admin panelidagi "Adminlar" ro'yxatida u ham ko'rinsin;
+   *   - `Admins.getAll()`/`getPermissions()` unga to'liq huquq qaytarsin.
+   * Jadvaldagi yozuv `.env` ni ALMASHTIRMAYDI — `.env` baribir birlamchi
+   * manba bo'lib qoladi (yuqoridagi `isAdmin`).
+   */
+  ensureEnvAdmin(userId, profile = {}) {
+    const id = String(userId || '').trim();
+    if (!id) return false;
+
+    const isSuper = id === SUPER_ADMIN_ID;
+    if (!isSuper && !ENV_ADMIN_IDS.includes(id)) return false;
+
+    const existing = db.prepare('SELECT 1 FROM appointed_admins WHERE id = ?').get(id);
+    if (existing) return false; // allaqachon bor — qayta yozmaymiz
+
+    this.upsert({
+      id,
+      name: profile.name || `Admin #${id}`,
+      username: profile.username || '',
+      roleTitle: isSuper ? 'Bosh Admin' : 'Admin',
+      isSuperAdmin: isSuper,
+      permissions: fullPermissions(),
+      appointedBy: 'env',
+    });
+    console.log(`[Admin] .env da ko'rsatilgan admin avtomatik ro'yxatga olindi: ${id}`);
+    return true;
   },
 
   getPermissions(userId) {
     if (userId === SUPER_ADMIN_ID) return fullPermissions();
     const row = db.prepare('SELECT permissions FROM appointed_admins WHERE id = ?').get(userId);
-    return row ? JSON.parse(row.permissions) : null;
+    return row ? safeJsonParse(row.permissions, {}, 'appointed_admins.permissions') : null;
   },
 };
 
@@ -809,6 +1201,88 @@ export const TokenUnlock = {
 };
 
 // ══════════════════════════════════════════════════════════════════
+//  TELEGRAM BOT ORQALI TASDIQLASH KODLARI
+// ══════════════════════════════════════════════════════════════════
+//
+// Sayt Telegram Mini App TASHQARISIDA (oddiy brauzerda) ochilganda server
+// tashrifchi kim ekanini bilmaydi — `initData` yo'q. Shu sababli bir
+// martalik kod ishlatiladi va u brauzer sessiyasini Telegram foydalanuvchisi
+// bilan bog'laydi.
+
+const VERIFY_CODE_TTL_MS = 15 * 60 * 1000; // 15 daqiqa
+
+export const VerificationCodes = {
+  /** Yangi kod yaratadi (sayt `POST /api/verify/start` da chaqiradi). */
+  create(code) {
+    db.prepare(`
+      INSERT INTO verification_codes (code, status, created_at)
+      VALUES (?, 'pending', ?)
+    `).run(code, new Date().toISOString());
+    return this.getByCode(code);
+  },
+
+  getByCode(code) {
+    if (!code) return null;
+    return db.prepare('SELECT * FROM verification_codes WHERE code = ?').get(String(code)) || null;
+  },
+
+  /** Muddati o'tganmi? */
+  isExpired(row) {
+    if (!row) return true;
+    return Date.now() - new Date(row.created_at).getTime() > VERIFY_CODE_TTL_MS;
+  },
+
+  /**
+   * Bot `/start <kod>` ni qabul qilganda: kodni suhbatga bog'laymiz va
+   * kontakt kutish holatiga o'tkazamiz.
+   */
+  attachChat(code, telegramId, chatId) {
+    const row = this.getByCode(code);
+    if (!row || row.status === 'verified' || this.isExpired(row)) return null;
+    db.prepare(`
+      UPDATE verification_codes
+      SET status = 'awaiting_contact', telegram_id = ?, chat_id = ?
+      WHERE code = ?
+    `).run(String(telegramId), String(chatId), String(code));
+    return this.getByCode(code);
+  },
+
+  /** Shu suhbat uchun kontakt kutayotgan eng oxirgi kodni topadi. */
+  findAwaitingByChat(chatId) {
+    return db.prepare(`
+      SELECT * FROM verification_codes
+      WHERE chat_id = ? AND status = 'awaiting_contact'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(String(chatId)) || null;
+  },
+
+  /** Kontakt tasdiqlandi. */
+  markVerified(code, telegramId, phone) {
+    db.prepare(`
+      UPDATE verification_codes
+      SET status = 'verified', telegram_id = ?, phone = ?, verified_at = ?
+      WHERE code = ?
+    `).run(String(telegramId), phone || null, new Date().toISOString(), String(code));
+    return this.getByCode(code);
+  },
+
+  /**
+   * Sayt tokenni olib ketdi. Kod BIR MARTALIK: ikkinchi so'rov token
+   * bermaydi, shunda kod boshqa odam qo'liga tushsa ham foyda bermaydi.
+   */
+  markClaimed(code) {
+    db.prepare('UPDATE verification_codes SET claimed_at = ? WHERE code = ?')
+      .run(new Date().toISOString(), String(code));
+  },
+
+  /** Eski kodlarni tozalash (boot'da va davriy ravishda). */
+  cleanupExpired() {
+    const cutoff = new Date(Date.now() - VERIFY_CODE_TTL_MS).toISOString();
+    return db.prepare('DELETE FROM verification_codes WHERE created_at < ?').run(cutoff);
+  },
+};
+
+// ══════════════════════════════════════════════════════════════════
 //  STATS (Statistika)
 // ══════════════════════════════════════════════════════════════════
 
@@ -847,9 +1321,30 @@ export function seedIfEmpty() {
     console.log('[DB Seed] Super Admin yaratildi');
   }
 
-  if (Settings.get().botUsername === DEFAULT_SETTINGS.botUsername) {
-    Settings.update(DEFAULT_SETTINGS);
-    console.log('[DB Seed] Default settings saqlandi');
+  // ═══ TUZATILDI: HAR RESTARTDA ADMIN SOZLAMALARI O'CHIB KETARDI ═══
+  //
+  // ESKI KOD:
+  //   if (Settings.get().botUsername === DEFAULT_SETTINGS.botUsername) {
+  //     Settings.update(DEFAULT_SETTINGS);
+  //   }
+  //
+  // 2 ta muammo bor edi:
+  //  1) `Settings.update` ichida `{ ...current, ...partial }` — ya'ni
+  //     uzatilgan DEFAULT qiymatlar mavjud qiymatlarni BOSIB KETADI.
+  //  2) Shart faqat `botUsername` ga qarardi, u esa deyarli hech qachon
+  //     'Manyaktvbot' dan o'zgartirilmaydi. Natijada HAR server ishga
+  //     tushganda admin kiritgan karta raqami, karta egasi, admin kontakti,
+  //     kanal linki va ban ro'yxatlari standart placeholder qiymatlarga
+  //     (karta: 8600 0000 0000 0000) qaytib ketardi.
+  //
+  // Endi sozlamalar qatori umuman yo'q bo'lsagina yaratiladi. `Settings.get()`
+  // allaqachon `{ ...DEFAULT_SETTINGS, ...saqlangan }` qaytaradi, shuning
+  // uchun keyin qo'shilgan yangi maydonlar avtomatik to'ldiriladi —
+  // mavjud qiymatlarni qayta yozish kerak emas.
+  const settingsRow = db.prepare('SELECT 1 FROM settings WHERE id = 1').get();
+  if (!settingsRow) {
+    db.prepare('INSERT INTO settings (id, data) VALUES (1, ?)').run(JSON.stringify(DEFAULT_SETTINGS));
+    console.log('[DB Seed] Standart sozlamalar yaratildi');
   }
 }
 

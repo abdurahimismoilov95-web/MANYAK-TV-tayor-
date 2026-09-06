@@ -4,7 +4,7 @@ import { ContentItem, UserProfile, SystemSettings, CatalogCategory } from '../ty
 import { HeroSlider } from '../components/HeroSlider';
 import { ContentCard } from '../components/ContentCard';
 import { DailyCheckInWidget } from '../components/DailyCheckInWidget';
-import { checkHasAccess, useAccessTokenToUnlock } from '../services/storage';
+import { checkHasAccess, spendTokenToUnlock } from '../services/storage';
 
 interface HomeViewProps {
   contents: ContentItem[];
@@ -65,6 +65,13 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const singleCatalogContents = selectedCatalog
     ? contents.filter((item) => isContentInCatalog(item, selectedCatalog))
     : contents;
+
+  // Hech bir KO'RINADIGAN katalogga tushmagan kontent.
+  // Katalog ro'yxati bo'sh bo'lsa — bu BARCHA kontent bo'ladi, ya'ni
+  // bosh sahifa baribir to'la ko'rinadi (pastdagi "kafolat" blokiga qarang).
+  const uncategorizedContents = contents.filter(
+    (item) => !activeCatalogs.some((catalog) => isContentInCatalog(item, catalog))
+  );
 
   // Render appropriate category icon
   const getCatalogIcon = (catalog: CatalogCategory) => {
@@ -243,10 +250,18 @@ export const HomeView: React.FC<HomeViewProps> = ({
                                   // Serial bo'lsa, foydalanuvchi qaysi qismni ochishni o'zi tanlashi uchun pleyer ochiladi
                                   onSelectContent(item);
                                 } else {
-                                  const res = useAccessTokenToUnlock(user.id, item.id, item.title);
-                                  if (res.success) {
-                                    onSelectContent(item);
-                                  }
+                                  // Token sarflash endi SERVER tomonida (async).
+                                  // ESKI KOD natijani e'tiborsiz qoldirardi:
+                                  // token tugagan bo'lsa tugma hech nima
+                                  // qilmasdi va foydalanuvchi sababini
+                                  // bilmasdi. Endi xato xabari ko'rsatiladi.
+                                  void spendTokenToUnlock(user.id, item.id, item.title).then((res) => {
+                                    if (res.success) {
+                                      onSelectContent(item);
+                                    } else {
+                                      alert(res.message);
+                                    }
+                                  });
                                 }
                               }}
                               className="py-1.5 px-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-md shadow-amber-600/20 transition flex items-center gap-1"
@@ -330,6 +345,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
             const catItems = contents.filter((item) => isContentInCatalog(item, catalog));
             if (catItems.length === 0) return null;
 
+
             const isMiniDrama = catalog.format === 'vertical_9_16' || catalog.id === 'cat_mini_drama';
 
             return (
@@ -367,6 +383,71 @@ export const HomeView: React.FC<HomeViewProps> = ({
               </section>
             );
           })}
+
+          {/* ═══════════════════════════════════════════════════════════════
+            *  KAFOLAT: KONTENT HECH QACHON KO'RINMAY QOLMASLIGI KERAK
+            * ═══════════════════════════════════════════════════════════════
+            *
+            * MUAMMO: yuqoridagi ro'yxat bosh sahifani FAQAT
+            * `settings.catalogs` dan yasaydi. Agar:
+            *   - katalog ro'yxati bo'sh bo'lsa (yangi o'rnatish yoki kesh
+            *     tozalangan holat — aynan shu bug edi),
+            *   - admin barcha kataloglarni o'chirsa yoki `isVisible: false`
+            *     qilsa,
+            *   - yoki kontent hech bir katalog shartiga mos kelmasa
+            *     (masalan admin yangi tur qo'shsa),
+            * bosh sahifa BUTUNLAY BO'SH ko'rinardi — kontent bazada bor
+            * bo'lsa ham. Foydalanuvchi uchun bu "ilova ishlamayapti" degani.
+            *
+            * Pastdagi blok shu holatlarni qoplaydi: hech bir katalogga
+            * tushmagan kontentni alohida bo'limda ko'rsatadi.
+            */}
+          {uncategorizedContents.length > 0 && (
+            <section className="px-4">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                    <FolderHeart className="w-4 h-4 text-zinc-400" />
+                    <span>
+                      {activeCatalogs.length === 0 ? 'Barcha kontentlar' : 'Boshqa kontentlar'}
+                    </span>
+                  </h3>
+                  <div className="w-8 h-0.5 bg-red-600 rounded-full mt-0.5" />
+                </div>
+                <span className="text-xs font-bold text-zinc-500">
+                  {uncategorizedContents.length} ta
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3">
+                {uncategorizedContents.map((item) => (
+                  <ContentCard
+                    key={item.id}
+                    item={item}
+                    hasAccess={checkHasAccess(user, item)}
+                    onClick={() => onSelectContent(item)}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Haqiqatan kontent yo'q bo'lsa — bo'sh ekran o'rniga tushunarli
+            * xabar. Ilgari bu holat ham shunchaki bo'sh sahifa edi. */}
+          {contents.length === 0 && (
+            <section className="px-4">
+              <div className="flex flex-col items-center justify-center text-center py-14 px-6 rounded-2xl bg-zinc-950/80 border border-zinc-800">
+                <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500 mb-3">
+                  <Film className="w-7 h-7" />
+                </div>
+                <h3 className="text-sm font-bold text-white mb-1">Hozircha kontent yo'q</h3>
+                <p className="text-xs text-zinc-400 max-w-xs leading-relaxed">
+                  Kinolar va seriallar hali qo'shilmagan. Internet aloqasini
+                  tekshirib, sahifani yangilab ko'ring.
+                </p>
+              </div>
+            </section>
+          )}
         </div>
       )}
     </div>

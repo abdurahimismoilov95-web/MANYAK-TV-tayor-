@@ -25,12 +25,7 @@ import {
   bindUserToCurrentDevice,
   evaluateDeviceDeviation,
 } from './deviceSecurity';
-import {
-  notifyReceiptSubmissionViaTelegram,
-  notifyReceiptApprovedViaTelegram,
-  notifyReceiptRejectedViaTelegram,
-} from './telegramBot';
-import { getAuthHeaders } from './authToken';
+import { getAuthHeaders, invalidateAuthToken } from './authToken';
 
 const KEYS = {
   CONTENT: 'manyak_tv_content_v1',
@@ -57,15 +52,92 @@ function getItem<T>(key: string, fallback: T): T {
   }
 }
 
-function setItem<T>(key: string, value: T, emitEvent = true): void {
+/**
+ * localStorage kvotasi tugaganda ilova ishlashda davom etishi kerak —
+ * shuning uchun kesh yozuvi muvaffaqiyatsiz bo'lsa BUG'IB QOLMAYMIZ, lekin
+ * uni JIMGINA HAM YUTMAYMIZ: `manyak_storage_error` hodisasi yuboriladi va
+ * UI foydalanuvchiga ogohlantirish ko'rsatishi mumkin.
+ *
+ * ESKI KOD faqat `console.error` qilardi. Bu Safari private rejimi va
+ * cheklangan Telegram WebView'larida shunday ko'rinardi: har bir xarid,
+ * token sarflash, sevimli va tarix yozuvi JIMGINA yo'qoladi, UI esa
+ * muvaffaqiyat haqida xabar beradi.
+ *
+ * @returns yozuv muvaffaqiyatli bo'lsa `true`
+ */
+function setItem<T>(key: string, value: T, emitEvent = true): boolean {
+  if (typeof localStorage === 'undefined') return false;
+
   try {
     localStorage.setItem(key, JSON.stringify(value));
     if (emitEvent && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('manyak_storage_update', { detail: { key } }));
     }
+    return true;
   } catch (err) {
-    console.error(`Error saving ${key} to storage:`, err);
+    // Kvota tugashi (QuotaExceededError / NS_ERROR_DOM_QUOTA_REACHED) eng
+    // ko'p uchraydigan holat — bunda eski keshni tozalab qayta urinamiz.
+    const isQuotaError =
+      err instanceof DOMException &&
+      (err.name === 'QuotaExceededError' ||
+        err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+        err.code === 22);
+
+    if (isQuotaError && pruneCacheForSpace(key)) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+        if (emitEvent && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('manyak_storage_update', { detail: { key } }));
+        }
+        return true;
+      } catch {
+        // pastdagi umumiy xato yo'liga tushamiz
+      }
+    }
+
+    console.error(`[Storage] '${key}' saqlanmadi:`, err);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('manyak_storage_error', {
+          detail: {
+            key,
+            isQuotaError,
+            message: isQuotaError
+              ? "Qurilma xotirasi to'lgan — ma'lumot vaqtincha saqlanmadi. Muhim ma'lumotlar serverda saqlangan."
+              : "Ma'lumotni qurilmada saqlab bo'lmadi (brauzer xotirasi cheklangan).",
+          },
+        })
+      );
+    }
+    return false;
   }
+}
+
+/**
+ * Kvota tugaganda joy bo'shatish uchun eng KATTA va eng KAM MUHIM keshni
+ * tozalaydi. Bu ma'lumotlar serverda bor (yoki qayta yaratiladi), shuning
+ * uchun ularni o'chirish xavfsiz.
+ *
+ * @returns joy bo'shatilgan bo'lsa `true`
+ */
+function pruneCacheForSpace(exceptKey: string): boolean {
+  // Muhimlik tartibida: eng avval tashlab yuborilishi mumkin bo'lganlar
+  const disposable = [KEYS.AUDIT_LOGS, KEYS.RECEIPTS, KEYS.HISTORY, KEYS.CONTENT];
+  let freed = false;
+
+  for (const key of disposable) {
+    if (key === exceptKey) continue;
+    try {
+      if (localStorage.getItem(key) !== null) {
+        localStorage.removeItem(key);
+        freed = true;
+        console.warn(`[Storage] Xotira tugadi — '${key}' keshi tozalandi (ma'lumot serverda saqlanadi).`);
+      }
+    } catch {
+      // o'chirish ham ishlamasa — davom etamiz
+    }
+  }
+  return freed;
 }
 
 // 1. CONTENT
@@ -92,49 +164,135 @@ export function getStoredContent(): ContentItem[] {
   });
 }
 
-export function saveStoredContent(content: ContentItem): void {
-  const all = getStoredContent();
-  const existingIdx = all.findIndex((c) => c.id === content.id);
-  const isNew = existingIdx < 0;
-  if (existingIdx >= 0) {
-    all[existingIdx] = content;
-  } else {
-    all.unshift(content);
-  }
-  setItem(KEYS.CONTENT, all);
+/**
+ * Kontentni saqlaydi (qo'shadi yoki tahrirlaydi).
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ *  1-MUAMMO: "ADMIN QO'SHGAN KONTENT FAQAT ADMINGA KO'RINADI"
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * ESKI KOD:
+ *     setItem(KEYS.CONTENT, all);              // 1) localStorage'ga yozadi
+ *     getAuthHeaders().then((h) => {
+ *       fetch('/api/contents', {...})          // 2) serverga "otib yuboradi"
+ *         .then(d => { if (!d?.ok) console.error(...) })   // xato -> konsol
+ *         .catch(err => console.error(...));
+ *     });
+ *                                              // 3) darhol qaytadi
+ *
+ * Nima uchun kontent faqat adminga ko'rinardi:
+ *
+ *   a) Serverga so'rov NATIJASI KUTILMASDI va xato faqat `console.error`
+ *      ga yozilardi. AdminPanel esa `saveStoredContent(...)` dan keyin
+ *      darhol "muvaffaqiyatli saqlandi!" xabarini ko'rsatardi.
+ *
+ *   b) `getAuthHeaders()` Telegram `initData` bo'lmaganda BO'SH `{}`
+ *      qaytaradi. Ya'ni admin panelni oddiy brauzerda (Telegram bot
+ *      orqali emas) ochgan bo'lsa, so'rov tokensiz ketardi va server
+ *      401 bilan RAD ETARDI.
+ *
+ *   Natijada kontent FAQAT admin brauzerining localStorage'ida qolardi.
+ *   Admin uni ko'rardi (o'z keshidan), boshqa foydalanuvchilar esa
+ *   serverdan (`syncContentFromServer`) o'qigani uchun ko'rmasdi.
+ *
+ * ENDI: SERVER BIRINCHI. Avval serverga yoziladi; muvaffaqiyat bo'lsagina
+ * lokal kesh yangilanadi. Xato bo'lsa `throw` qiladi — AdminPanel esa
+ * haqiqiy sababni ko'rsatadi ("tizimga kirilmagan", "ruxsat yo'q" va h.k.).
+ * Shunday qilib "saqlandi" degan xabar faqat kontent HAMMAGA ko'rinadigan
+ * holatda chiqadi.
+ */
+export async function saveStoredContent(content: ContentItem): Promise<ContentItem> {
+  const authHeaders = await getAuthHeaders();
 
-  // MUHIM: ilgari kontent FAQAT shu qurilma/brauzerning localStorage'iga
-  // yozilardi. Bu — admin qo'shgan kino/serial faqat admin telefonida
-  // ko'rinib, boshqa HECH KIMGA ko'rinmasligi bugining asosiy sababi edi.
-  // Backendda /api/contents (SQLite) allaqachon tayyor bo'lgani uchun,
-  // endi har bir saqlashda serverga ham yuboramiz — shunda barcha
-  // foydalanuvchilar bitta umumiy ma'lumotlar bazasidan o'qiydi.
-  getAuthHeaders().then((authHeaders) => {
-    fetch(isNew ? '/api/contents' : `/api/contents/${content.id}`, {
+  if (!authHeaders.Authorization) {
+    throw new Error(
+      "Tizimga kirilmagan: kontentni saqlash uchun ilovani Telegram bot orqali ochishingiz kerak. " +
+      "Aks holda kontent faqat shu qurilmada qolib, boshqa foydalanuvchilarga ko'rinmaydi."
+    );
+  }
+
+  const all = getStoredContent();
+  const isNew = !all.some((c) => c.id === content.id);
+
+  let res: Response;
+  try {
+    res = await fetch(isNew ? '/api/contents' : `/api/contents/${content.id}`, {
       method: isNew ? 'POST' : 'PUT',
       headers: { 'Content-Type': 'application/json', ...authHeaders },
       body: JSON.stringify(content),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data?.ok) {
-          console.error('Kontentni serverga saqlab bo\'lmadi:', data?.error);
-        }
-      })
-      .catch((err) => console.error('Kontentni serverga saqlashda tarmoq xatosi:', err));
-  });
+    });
+  } catch {
+    throw new Error("Serverga ulanib bo'lmadi. Internet aloqasini tekshirib, qayta urinib ko'ring.");
+  }
+
+  if (res.status === 401) {
+    invalidateAuthToken();
+    throw new Error('Sessiya muddati tugagan. Ilovani qayta ochib, yana urinib ko\'ring.');
+  }
+  if (res.status === 403) {
+    throw new Error("Ruxsat yo'q: bu amal uchun administrator huquqi kerak.");
+  }
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || `Kontentni serverga saqlab bo'lmadi (status ${res.status}).`);
+  }
+
+  // Server normallashtirilgan kontentni qaytaradi (id ni o'zi yaratishi mumkin)
+  const saved: ContentItem = data.content || content;
+
+  // Endi lokal keshni yangilaymiz. Kesh yozilmasa ham muhim emas —
+  // kontent allaqachon serverda va `syncContentFromServer` uni tortadi.
+  const cached = getStoredContent();
+  const idx = cached.findIndex((c) => c.id === saved.id);
+  if (idx >= 0) cached[idx] = saved;
+  else cached.unshift(saved);
+  setItem(KEYS.CONTENT, cached);
+
+  return saved;
 }
 
-export function deleteStoredContent(id: string): void {
-  const all = getStoredContent().filter((c) => c.id !== id);
-  setItem(KEYS.CONTENT, all);
+/**
+ * Kontentni o'chiradi — bu ham SERVER BIRINCHI.
+ *
+ * ESKI KOD localStorage'dan darhol o'chirib, serverga fire-and-forget
+ * DELETE yuborardi. Server rad etsa (401/403), kontent admin ekranidan
+ * yo'qolardi, lekin BOSHQA foydalanuvchilarda QOLARDI — ya'ni admin uni
+ * "o'chirdim" deb o'ylardi.
+ */
+export async function deleteStoredContent(id: string): Promise<void> {
+  const authHeaders = await getAuthHeaders();
 
-  getAuthHeaders().then((authHeaders) => {
-    fetch(`/api/contents/${id}`, {
+  if (!authHeaders.Authorization) {
+    throw new Error(
+      "Tizimga kirilmagan: kontentni o'chirish uchun ilovani Telegram bot orqali ochishingiz kerak."
+    );
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`/api/contents/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: { ...authHeaders },
-    }).catch((err) => console.error("Kontentni serverdan o'chirishda tarmoq xatosi:", err));
-  });
+    });
+  } catch {
+    throw new Error("Serverga ulanib bo'lmadi. Internet aloqasini tekshiring.");
+  }
+
+  if (res.status === 401) {
+    invalidateAuthToken();
+    throw new Error('Sessiya muddati tugagan. Ilovani qayta ochib, yana urinib ko\'ring.');
+  }
+  if (res.status === 403) {
+    throw new Error("Ruxsat yo'q: bu amal uchun administrator huquqi kerak.");
+  }
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || `Kontentni o'chirib bo'lmadi (status ${res.status}).`);
+  }
+
+  setItem(KEYS.CONTENT, getStoredContent().filter((c) => c.id !== id));
 }
 
 // Serverdagi (SQLite) umumiy kontent ro'yxatini localStorage keshiga
@@ -152,6 +310,119 @@ export function syncContentFromServer(): Promise<void> {
     .catch((err) => {
       console.error('Kontentni serverdan olishda xatolik:', err);
     });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ENTITLEMENTS — pul bilan bog'liq holatning YAGONA HAQIQAT MANBASI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// MUAMMO: ilgari VIP holati, sotib olingan kinolar, ochilgan qismlar va
+// tokenlar localStorage'da "haqiqat" sifatida saqlanardi va klient kodning
+// o'zi ularni BERARDI (`reviewReceipt`, `performInstantPurchase`,
+// `useAccessTokenToUnlock`, `claimDailyCheckIn`). Ya'ni brauzer konsolida
+//     localStorage.setItem('manyak_tv_current_user_v1',
+//       JSON.stringify({ ...user, isVip: true, accessTokens: 999 }))
+// deb yozish yetarli edi — hech nima to'lamasdan butun katalog ochilardi.
+//
+// YECHIM: bu maydonlar endi FAQAT serverdan (`GET /api/me/entitlements`)
+// keladi. localStorage esa oddiy KESH: uni tahrirlash foydasiz, chunki
+// keyingi sinxronlashda server qiymati ustidan yozadi.
+
+/** Server tomonidan boshqariladigan maydonlar — klient bularni O'ZI YOZMAYDI. */
+export interface Entitlements {
+  userId: string;
+  isVip: boolean;
+  vipExpiresAt: string | null;
+  purchasedContentIds: string[];
+  unlockedEpisodeIds: string[];
+  accessTokens: number;
+  bonusBalance: number;
+  vipDiscountPercent: number;
+  isPhoneVerified: boolean;
+  isBanned: boolean;
+  isAdmin: boolean;
+  isSuperAdmin: boolean;
+  /** Faqat adminlarga qaytariladi; oddiy foydalanuvchida `null`. */
+  superAdminId: string | null;
+  syncedAt: string;
+}
+
+/**
+ * Serverdan avtoritiv entitlement'larni olib, keshlangan profilga yozadi.
+ *
+ * Telegram tashqarisida (JWT yo'q) `null` qaytaradi — bu holda keshdagi
+ * qiymat o'zgarmaydi, lekin u ham hech qanday huquq BERMAYDI, chunki
+ * haqiqiy tekshiruv serverda (`/api/tokens/unlock`, chek tasdiqlash va h.k.).
+ */
+export async function syncEntitlementsFromServer(): Promise<Entitlements | null> {
+  const authHeaders = await getAuthHeaders();
+  if (!authHeaders.Authorization) return null;
+
+  try {
+    const res = await fetch('/api/me/entitlements', { headers: authHeaders });
+    if (!res.ok) {
+      // 401 => token eskirgan yoki secret o'zgargan; keshni tozalab
+      // keyingi so'rovda yangi token olinadi.
+      if (res.status === 401) invalidateAuthToken();
+      console.warn(`[Entitlements] Serverdan olinmadi (status ${res.status})`);
+      return null;
+    }
+    const data = await res.json();
+    if (!data?.ok || !data.entitlements) return null;
+
+    return applyEntitlementsToCache(data.entitlements as Entitlements);
+  } catch (err) {
+    // Oflayn holat — keshdagi qiymat bilan davom etamiz
+    console.warn('[Entitlements] Tarmoq xatosi, keshdagi qiymat ishlatiladi:', err);
+    return null;
+  }
+}
+
+/**
+ * Server qiymatlarini keshlangan `CURRENT_USER` va `USERS` yozuvlariga
+ * yozadi. Faqat entitlement maydonlari yangilanadi — ism, avatar kabi
+ * klient tomonidagi zararsiz maydonlar saqlanadi.
+ */
+function applyEntitlementsToCache(ent: Entitlements): Entitlements {
+  // Adminlik holatini serverning JWT claim'idan belgilaymiz — bu
+  // localStorage'dagi hech qanday qiymatga bog'liq emas.
+  setServerVerifiedAdmin(ent.userId, ent.isAdmin, ent.isSuperAdmin);
+
+  // Bosh admin ID si faqat adminlarga qaytariladi (aks holda `null`).
+  runtimeSuperAdminId = ent.superAdminId || '';
+
+  const stored = getItem<UserProfile | null>(KEYS.CURRENT_USER, null);
+  if (!stored || stored.id !== ent.userId) return ent;
+
+  const updated: UserProfile = {
+    ...stored,
+    isVip: ent.isVip,
+    vipExpiresAt: ent.vipExpiresAt || undefined,
+    purchasedContentIds: ent.purchasedContentIds,
+    unlockedEpisodeIds: ent.unlockedEpisodeIds,
+    accessTokens: ent.accessTokens,
+    bonusBalance: ent.bonusBalance,
+    vipDiscountPercent: ent.vipDiscountPercent,
+    isPhoneVerified: ent.isPhoneVerified,
+  };
+
+  setItem(KEYS.CURRENT_USER, updated, false);
+
+  // `USERS` katalogidagi nusxani ham moslashtiramiz, aks holda keyinroq
+  // `{ ...current, ...targetUser }` shaklidagi birlashmalar eski
+  // entitlement qiymatlarini qaytarib qo'yadi.
+  const all = getItem<UserProfile[]>(KEYS.USERS, INITIAL_USERS);
+  const idx = all.findIndex((u) => u.id === ent.userId);
+  if (idx >= 0) {
+    all[idx] = { ...all[idx], ...updated };
+    setItem(KEYS.USERS, all, false);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('manyak_storage_update', { detail: { key: KEYS.CURRENT_USER } }));
+  }
+
+  return ent;
 }
 
 // Fayl (poster rasm yoki video) ni serverga yuklab, doimiy URL qaytaradi.
@@ -227,37 +498,28 @@ export function recordContentRevenue(contentId: string, amount: number): void {
 export function getStoredSettings(): SystemSettings {
   const loaded = getItem<SystemSettings>(KEYS.SETTINGS, INITIAL_SETTINGS);
   
-  // Guarantee super admin 891846690 is present in appointedAdmins with full permissions
-  const initialAppointed = INITIAL_SETTINGS.appointedAdmins || [];
-  const existingAppointed = Array.isArray(loaded.appointedAdmins) ? [...loaded.appointedAdmins] : [...initialAppointed];
-  const superAdminIdx = existingAppointed.findIndex((a) => a.id === '891846690');
-  const superAdminRecord: AppointedAdmin = {
-    id: '891846690',
-    name: 'Bosh Admin (Egasi)',
-    username: 'manyak_admin',
-    roleTitle: "👑 Bosh Admin (To'liq huquq)",
-    isSuperAdmin: true,
-    permissions: {
-      canAddContent: true,
-      canEditContent: true,
-      canDeleteContent: true,
-      canManageUsers: true,
-      canManageCatalogs: true,
-      canManageReceipts: true,
-      canManagePlans: true,
-      canManagePromoCodes: true,
-      canBroadcast: true,
-      canViewStats: true,
-      canManageSettings: true,
-      canManageAdmins: true,
-    },
-    appointedAt: superAdminIdx >= 0 ? existingAppointed[superAdminIdx].appointedAt : '2024-01-01T00:00:00.000Z',
-  };
-  if (superAdminIdx >= 0) {
-    existingAppointed[superAdminIdx] = superAdminRecord;
-  } else {
-    existingAppointed.unshift(superAdminRecord);
-  }
+  // ═══ 4-MUAMMO: ADMINLIK BOSHQALARGA KO'RINMASLIGI KERAK ═══
+  //
+  // ESKI KOD har bir foydalanuvchining lokal sozlamalariga Bosh Admin
+  // Telegram ID sini QATTIQ YOZILGAN holda qo'shib qo'yardi:
+  //
+  //   const superAdminIdx = existingAppointed.findIndex(a => a.id === '891846690');
+  //   ... existingAppointed.push({ id: '891846690', ... })
+  //
+  // Ya'ni bu ID frontend bundle'ida ochiq yotardi va HAR BIR oddiy
+  // foydalanuvchining localStorage'iga yozilardi — istalgan odam kimning
+  // admin ekanini bilib olardi.
+  //
+  // Endi adminlar ro'yxati faqat SERVERDAN keladi va `/api/settings`
+  // endpointi `auth + adminOnly` bilan himoyalangan, ya'ni oddiy
+  // foydalanuvchi uni umuman ola olmaydi. Qattiq yozilgan ID olib tashlandi.
+  // (Quyidagi eski blok ataylab bo'sh qoldirildi.)
+  // Lokal keshda faqat serverdan kelgan (admin ko'rgan) ro'yxat bo'lishi
+  // mumkin. Oddiy foydalanuvchida bu ro'yxat BO'SH bo'ladi — va shunday
+  // bo'lishi kerak.
+  const existingAppointed: AppointedAdmin[] = Array.isArray(loaded.appointedAdmins)
+    ? loaded.appointedAdmins
+    : [];
 
   // Ensure backward compatibility with newly added fields
   return {
@@ -265,7 +527,13 @@ export function getStoredSettings(): SystemSettings {
     ...loaded,
     botUsername: loaded.botUsername || loaded.telegramBotUsername || 'Manyaktvbot',
     telegramBotUsername: loaded.telegramBotUsername || loaded.botUsername || 'Manyaktvbot',
-    secondaryAdminPassword: loaded.secondaryAdminPassword || INITIAL_SETTINGS.secondaryAdminPassword || '8918',
+    // ESKI KOD: `... || '8918'` — sozlamada PIN o'rnatilmagan bo'lsa,
+    // hamma o'rnatma uchun bir xil, kod ichida ochiq yozilgan PIN ishlardi
+    // (AdminPanel esa uni xato xabarida to'g'ridan-to'g'ri aytib berardi).
+    // Endi standart qiymat YO'Q: PIN o'rnatilmagan bo'lsa, xavfli amallar
+    // uchun tasdiqlash o'tmaydi (fail-closed) va admin avval o'zining
+    // PIN'ini o'rnatishi kerak.
+    secondaryAdminPassword: loaded.secondaryAdminPassword || INITIAL_SETTINGS.secondaryAdminPassword || '',
     enabledPaymentMethods: {
       ...INITIAL_SETTINGS.enabledPaymentMethods!,
       ...(loaded.enabledPaymentMethods || {}),
@@ -399,81 +667,19 @@ export function validatePromoCode(
 }
 
 // 5. USERS DIRECTORY & MANAGEMENT
-const INITIAL_USERS: UserProfile[] = [
-  {
-    id: '891846690',
-    firstName: 'Admin (891846690)',
-    lastName: '',
-    username: 'manyak_admin',
-    phone: '+998901234567',
-    isPhoneVerified: true,
-    isVip: true,
-    vipExpiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-    purchasedContentIds: ['sd-milliarder-kuyov'],
-    favorites: ['m-parijdagi-akula', 's-ajdar-xonadoni'],
-    deviceToken: 'DEV_ADMIN_HWID_MASTER',
-    createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
-    lastLoginAt: new Date().toISOString(),
-  },
-  {
-    id: '109283741',
-    firstName: 'Akmal',
-    lastName: 'Karimov',
-    username: 'akmalkarim',
-    phone: '+998971234567',
-    isPhoneVerified: true,
-    isVip: true,
-    vipExpiresAt: new Date(Date.now() + 25 * 24 * 60 * 60 * 1000).toISOString(),
-    purchasedContentIds: [],
-    favorites: ['m-parijdagi-akula'],
-    deviceToken: 'DEV_HWID_AKMAL_SAM9',
-    createdAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(),
-    lastLoginAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-  },
-  {
-    id: '992831021',
-    firstName: 'Sardor',
-    lastName: 'Rustamov',
-    username: 'sardor_r',
-    phone: '+998934567890',
-    isPhoneVerified: true,
-    isVip: false,
-    purchasedContentIds: ['sd-milliarder-kuyov'],
-    favorites: ['sd-milliarder-kuyov'],
-    deviceToken: 'DEV_HWID_SARDOR_REDMI',
-    createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-    lastLoginAt: new Date(Date.now() - 3600000 * 5).toISOString(),
-  },
-  {
-    id: '552190833',
-    firstName: 'Jasur',
-    lastName: 'Bek',
-    username: 'jasur_kino',
-    phone: '+998901112233',
-    isPhoneVerified: true,
-    isVip: false,
-    purchasedContentIds: [],
-    favorites: [],
-    deviceToken: 'DEV_HWID_JASUR_IPHONE',
-    createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-    lastLoginAt: new Date(Date.now() - 3600000 * 1).toISOString(),
-  },
-  {
-    id: '771920311',
-    firstName: 'Madina',
-    lastName: 'Aliyeva',
-    username: 'madina_a',
-    phone: '+998998887766',
-    isPhoneVerified: true,
-    isVip: true,
-    vipExpiresAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString(),
-    purchasedContentIds: ['sd-milliarder-kuyov', 'sd-qora-oqshom'],
-    favorites: ['s-ajdar-xonadoni'],
-    deviceToken: 'DEV_HWID_MADINA_HONOR',
-    createdAt: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(),
-    lastLoginAt: new Date(Date.now() - 3600000 * 8).toISOString(),
-  },
-];
+// ═══ 4-MUAMMO: DEMO ADMIN VA DEMO FOYDALANUVCHILAR OLIB TASHLANDI ═══
+//
+// ESKI KOD bu yerda 3 ta soxta foydalanuvchini, jumladan
+//   { id: '891846690', firstName: 'Admin (891846690)', isVip: true, ... }
+// ni saqlab turardi va u `KEYS.USERS` uchun ZAXIRA qiymat edi. Ya'ni
+// har bir ODDIY foydalanuvchining brauzerida "kim admin ekani" ko'rinib
+// turardi (ID, username, telefon raqami bilan). Bu talabga zid:
+// "oddiy foydalanuvchilarga boshqa birovning admin ekanligi hech qanday
+// joyda ko'rinmasligi kerak".
+//
+// Foydalanuvchilar ro'yxati endi FAQAT serverdan keladi va
+// `GET /api/users` `auth + adminOnly` bilan himoyalangan.
+const INITIAL_USERS: UserProfile[] = [];
 
 export function getStoredUsers(): UserProfile[] {
   const users = getItem<UserProfile[]>(KEYS.USERS, INITIAL_USERS);
@@ -701,10 +907,15 @@ export function getStoredCurrentUser(): UserProfile {
             username: tgUser.username || '',
             phone: undefined,
             isPhoneVerified: false,
-            isVip: isAutoAdmin,
-            vipExpiresAt: isAutoAdmin
-              ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
-              : undefined,
+            // ESKI KOD: `isVip: isAutoAdmin` va 365 kunlik `vipExpiresAt` —
+            // ya'ni klient yangi profil yaratayotganda O'ZIGA VIP berardi.
+            // Entitlement endi FAQAT serverdan keladi
+            // (`syncEntitlementsFromServer`), shuning uchun bu yerda
+            // hech qanday huquq berilmaydi. Agar bu foydalanuvchi haqiqatan
+            // admin bo'lsa, server `/api/auth/verify` da uni VIP qilib
+            // yaratadi va keyingi sinxronlashda kesh ham yangilanadi.
+            isVip: false,
+            vipExpiresAt: undefined,
             purchasedContentIds: [],
             favorites: [],
             deviceToken: currentHwid,
@@ -733,7 +944,12 @@ export function getStoredCurrentUser(): UserProfile {
   // yozib qo'yilgan bo'lsa-yu, lekin bu safar Telegram orqali haqiqiy shu ID
   // bilan tasdiqlanmagan bo'lsa — bunday "zaharlangan" sessiyaga ishonmaymiz
   // va uni pastdagi oddiy mehmon oqimiga qaytaramiz.
-  const poisonedStoredSession = !tgUserId && stored?.id === '891846690';
+  // Ilgari bu yerda qattiq yozilgan '891846690' bilan taqqoslanardi (ya'ni
+  // bosh admin ID si bundle'da oshkor bo'lardi). Endi ID kerak emas:
+  // Telegram tashqarisida ochilgan sessiya ADMIN huquqiga ega bo'lib
+  // ko'rinsa — u ishonchsiz, chunki adminlik faqat server tasdiqlashi
+  // bilan beriladi.
+  const poisonedStoredSession = !tgUserId && Boolean(stored?.isVip) && !stored?.isPhoneVerified;
   if (poisonedStoredSession) {
     try {
       localStorage.removeItem(KEYS.CURRENT_USER);
@@ -813,20 +1029,65 @@ export function saveStoredCurrentUser(user: UserProfile): void {
   }
 }
 
-export function verifyUserPhone(phone: string): UserProfile {
-  const user = getStoredCurrentUser();
-  user.phone = phone;
-  user.isPhoneVerified = true;
-  saveStoredCurrentUser(user);
-  return user;
-}
+// ═══════════════════════════════════════════════════════════════════════════
+//  OLIB TASHLANGAN: verifyUserPhone() va verifyUserViaBot()
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Bu ikki funksiya `isPhoneVerified = true` ni KLIENT tomonida
+// localStorage'ga yozardi:
+//
+//     export function verifyUserPhone(phone: string): UserProfile {
+//       const user = getStoredCurrentUser();
+//       user.phone = phone;
+//       user.isPhoneVerified = true;   // <- hech qanday tekshiruvsiz
+//       saveStoredCurrentUser(user);
+//       return user;
+//     }
+//
+// Uch nuqson bor edi:
+//   1) hech qanday haqiqiy tasdiqlash yo'q — istalgan raqam yozilardi;
+//   2) `verifyUserViaBot` hatto `TG_<id>` degan SOXTA raqam yozardi;
+//   3) `isPhoneVerified` serverda `SERVER_OWNED_USER_FIELDS` ro'yxatida,
+//      shuning uchun `/api/sync-user` klient qiymatini server qiymati bilan
+//      QAYTA YOZARDI — ya'ni "tasdiqlash" keyingi sinxronlashda yo'qolardi
+//      va modal yana ochilardi.
+//
+// Tasdiqlash endi FAQAT Telegram bot orqali, server tomonida bo'ladi
+// (qarang: server.js `handleContactVerification` va
+// `src/components/TelegramVerificationModal.tsx`).
 
-export function verifyUserViaBot(customPhone?: string): UserProfile {
-  const user = getStoredCurrentUser();
-  user.phone = customPhone || user.phone || `TG_${user.id}`;
-  user.isPhoneVerified = true;
-  saveStoredCurrentUser(user);
-  return user;
+/**
+ * Bot orqali tasdiqlash muvaffaqiyatli bo'lgandan keyin serverdan kelgan
+ * profilni lokal keshga yozadi.
+ *
+ * MUHIM: bu funksiya hech narsani "tasdiqlamaydi" — u faqat SERVER
+ * tasdiqlagan natijani keshlaydi. Foydalanuvchi ID si serverdan keladi va
+ * u har doim Telegram ID ga teng.
+ */
+export function applyVerifiedSession(serverUser: UserProfile): UserProfile {
+  const stored = getItem<UserProfile | null>(KEYS.CURRENT_USER, null);
+
+  // Qurilmaga bog'lash (HWID) va boshqa lokal maydonlarni saqlab qolamiz,
+  // lekin identifikator va tasdiqlash holatini SERVERDAN olamiz.
+  const merged: UserProfile = {
+    ...(stored && stored.id === serverUser.id ? stored : {}),
+    ...serverUser,
+  };
+
+  // Yangi Telegram identifikatoriga o'tilgan bo'lsa (masalan avval mehmon
+  // sessiyasi bo'lgan), qurilma bog'lanishini shu profil uchun yangilaymiz.
+  if (!merged.hwidBinding) {
+    bindUserToCurrentDevice(merged);
+  }
+
+  setItem(KEYS.CURRENT_USER, merged, false);
+  saveStoredUser(merged);
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('manyak_storage_update'));
+  }
+
+  return merged;
 }
 
 export function switchUserProfile(telegramId: string, firstName: string, username?: string): UserProfile {
@@ -843,10 +1104,13 @@ export function switchUserProfile(telegramId: string, firstName: string, usernam
       id: telegramId,
       firstName: firstName || `Foydalanuvchi #${telegramId}`,
       username: username || '',
-      phone: isAdminId ? '+998901234567' : undefined,
-      isPhoneVerified: isAdminId ? true : false,
-      isVip: isAdminId ? true : false,
-      vipExpiresAt: isAdminId ? new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString() : undefined,
+      // ESKI KOD adminlar uchun bu yerda soxta telefon (`+998901234567`),
+      // `isPhoneVerified: true`, `isVip: true` va 60 kunlik muddat berardi.
+      // Bularning barchasi entitlement — endi faqat serverdan keladi.
+      phone: undefined,
+      isPhoneVerified: false,
+      isVip: false,
+      vipExpiresAt: undefined,
       purchasedContentIds: [],
       favorites: ['m-parijdagi-akula'],
       deviceToken: currentHwid,
@@ -860,48 +1124,38 @@ export function switchUserProfile(telegramId: string, firstName: string, usernam
 }
 
 /**
- * Verifies user via Telegram Profile (syncs with @Manyaktvbot)
- * If the profile belongs to an administrator, automatically grants site and admin access!
+ * Foydalanuvchini Telegram profili orqali tasdiqlaydi.
+ *
+ * ═══ OLIB TASHLANGAN XAVFSIZLIK TESHIGI ═══
+ *
+ * ESKI KOD adminlikni foydalanuvchi KIRITGAN MATNNI tenglashtirish bilan
+ * berardi:
+ *
+ *   const isPrimaryAdmin = cleanInput === '891846690'
+ *                       || cleanInput.toLowerCase() === 'manyak_admin';
+ *   if (isAdmin) {
+ *     localStorage.setItem('manyak_allow_pc_admin', 'true');
+ *     const adminUser = switchUserProfile(adminId, 'Bosh Admin (891846690)', ...);
+ *     adminUser.isVip = true;                 // <- bepul VIP
+ *     saveStoredCurrentUser(adminUser);       // <- admin profili localStorage'ga
+ *   }
+ *
+ * Ya'ni oynaga "891846690" deb yozish yetarli edi: hech qanday Telegram
+ * tasdiqlashi (initData HMAC) yo'q, hech qanday parol yo'q. Foydalanuvchi
+ * bir zumda Bosh Admin + VIP bo'lardi. `manyak_allow_pc_admin` esa
+ * brauzerdagi oddiy `true` satri — u ham avtorizatsiya sifatida
+ * ishlatilardi.
+ *
+ * ENDI: bu funksiya HECH KIMGA adminlik yoki VIP BERMAYDI. Adminlik faqat
+ * serverdan (Telegram initData HMAC tekshiruvidan o'tgan JWT `isAdmin`
+ * claim'i) keladi — qarang `syncEntitlementsFromServer()` va `isUserAdmin()`.
+ * Bu funksiya faqat profilni almashtiradi va telefonni belgilaydi.
  */
 export function verifyTelegramProfileAndAuthorize(
   telegramIdOrPhone: string,
   extra?: { firstName?: string; username?: string; phone?: string }
 ): { success: boolean; isAdmin: boolean; message: string; user: UserProfile } {
   const cleanInput = telegramIdOrPhone.trim().replace(/^@/, '');
-  const settings = getStoredSettings();
-  const adminIds = (settings.adminTelegramIds || []).map((id) => String(id).trim());
-
-  // Check if this Telegram ID belongs to an administrator
-  const isPrimaryAdmin = cleanInput === '891846690' || cleanInput.toLowerCase() === 'manyak_admin';
-  const isConfiguredAdmin = adminIds.includes(cleanInput);
-  const isAdmin = isPrimaryAdmin || isConfiguredAdmin;
-
-  if (isAdmin) {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('manyak_allow_pc_admin', 'true');
-    }
-    const adminId = cleanInput.match(/^\d+$/) ? cleanInput : '891846690';
-    const adminUser = switchUserProfile(
-      adminId,
-      extra?.firstName || 'Bosh Admin (891846690)',
-      extra?.username || 'manyak_admin'
-    );
-    adminUser.isPhoneVerified = true;
-    adminUser.isVip = true;
-    if (extra?.phone) adminUser.phone = extra.phone;
-    saveStoredCurrentUser(adminUser);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('manyak_storage_update'));
-    }
-
-    return {
-      success: true,
-      isAdmin: true,
-      message: "Adminlik Telegram profilingiz orqali tasdiqlandi! Saytga va boshqaruv paneliga to'liq kirish huquqi berildi.",
-      user: adminUser,
-    };
-  }
 
   // Regular user verification
   const current = getStoredCurrentUser();
@@ -925,8 +1179,11 @@ export function verifyTelegramProfileAndAuthorize(
 
   return {
     success: true,
+    // Adminlik BU YERDA aniqlanmaydi — server tasdiqlaydi. Agar shu
+    // foydalanuvchi haqiqatan admin bo'lsa, `syncEntitlementsFromServer()`
+    // buni aniqlaydi va admin paneli avtomatik ochiladi.
     isAdmin: false,
-    message: `Telegram profilingiz muvaffaqiyatli tasdiqlandi! @${settings.botUsername || 'Manyaktvbot'} orqali kinolarni to'liq tomosha qilishingiz mumkin.`,
+    message: `Telegram profilingiz muvaffaqiyatli tasdiqlandi! @${getStoredSettings().botUsername || 'Manyaktvbot'} orqali kinolarni to'liq tomosha qilishingiz mumkin.`,
     user,
   };
 }
@@ -952,7 +1209,26 @@ export function resetUserHWIDBindingInStorage(userId: string): boolean {
   return true;
 }
 
-export const SUPER_ADMIN_ID = '891846690';
+// ═══ 4-MUAMMO: BOSH ADMIN ID SI BUNDLE'DA QATTIQ YOZILGAN EDI ═══
+//
+// ESKI KOD: `export const SUPER_ADMIN_ID = '891846690';`
+// Bu qiymat frontend build ichida ochiq matnda yotardi, ya'ni saytni
+// ochgan istalgan odam platforma egasining Telegram ID sini bilib olardi.
+//
+// Endi bu qiymat SERVERDAN keladi (`/api/me/entitlements` -> `superAdminId`)
+// va server uni FAQAT adminning o'ziga qaytaradi. Oddiy foydalanuvchida
+// bu bo'sh satr bo'lib qoladi — uning interfeysida hech qanday admin
+// ma'lumoti ko'rinmaydi.
+let runtimeSuperAdminId = '';
+
+/**
+ * Serverdan tasdiqlangan bosh admin ID si (admin bo'lmaganlar uchun `''`).
+ * Faqat admin panel interfeysi uchun ishlatiladi; haqiqiy huquq tekshiruvi
+ * har doim serverda bo'ladi.
+ */
+export function getSuperAdminId(): string {
+  return runtimeSuperAdminId;
+}
 
 export const FULL_ADMIN_PERMISSIONS: AdminPermissions = {
   canAddContent: true,
@@ -984,17 +1260,71 @@ export const DEFAULT_SUB_ADMIN_PERMISSIONS: AdminPermissions = {
   canManageAdmins: false,
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMINLIK — SERVER TOMONIDAN TASDIQLANADI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ESKI KOD adminlikni FAQAT localStorage'dagi sozlamalardan aniqlardi:
+//     if (cleanId === SUPER_ADMIN_ID) return FULL_ADMIN_PERMISSIONS;
+//     const appointed = settings.appointedAdmins.find(...)
+//     const adminIds = settings.adminTelegramIds ...
+//
+// Ikkisi ham foydalanuvchi tahrirlay oladigan ma'lumot edi. Buni
+// `switchUserProfile('891846690')` (ProfileView'dagi test tugmasi) yoki
+// oddiy konsol buyrug'i bilan birlashtirsangiz — istalgan odam admin
+// panelini ochib, localStorage'dagi kontent/foydalanuvchi/sozlamalarni
+// o'zgartira olardi.
+//
+// ENDI: adminlik faqat SERVER tasdiqlagan JWT da `isAdmin: true` bo'lsa
+// beriladi (server buni Telegram initData HMAC tekshiruvidan keyin
+// `Admins.isAdmin()` orqali aniqlaydi — bu qiymatni soxtalashtirib
+// bo'lmaydi). localStorage'dagi sozlamalar endi faqat GRANULAR huquqlarni
+// (qaysi bo'lim ko'rinadi) belgilash uchun ishlatiladi — ya'ni allaqachon
+// server tasdiqlagan adminning huquqlarini TORAYTIRISHI mumkin, lekin
+// hech kimga adminlik BERA OLMAYDI.
+
+/** Serverdan tasdiqlangan admin foydalanuvchi ID si (JWT `isAdmin` claim). */
+let serverVerifiedAdminId: string | null = null;
+/** Serverdan tasdiqlangan super admin ID si. */
+let serverVerifiedSuperAdminId: string | null = null;
+
+/**
+ * `syncEntitlementsFromServer()` dan chaqiriladi — server JWT dagi
+ * `isAdmin` claim asosida adminlikni belgilaydi.
+ */
+function setServerVerifiedAdmin(userId: string, isAdmin: boolean, isSuperAdmin = false): void {
+  const id = String(userId).trim();
+  serverVerifiedAdminId = isAdmin ? id : null;
+  serverVerifiedSuperAdminId = isAdmin && isSuperAdmin ? id : null;
+}
+
+/** Server hali javob bermaganini tekshirish uchun (UI "yuklanmoqda" holati). */
+export function isAdminStatusVerified(): boolean {
+  return serverVerifiedAdminId !== null;
+}
+
 export function isUserSuperAdmin(userId?: string): boolean {
   if (!userId) return false;
-  return String(userId).trim() === SUPER_ADMIN_ID;
+  if (!serverVerifiedSuperAdminId) return false;
+  return serverVerifiedSuperAdminId === String(userId).trim();
+}
+
+export function isUserAdmin(userId?: string): boolean {
+  if (!userId) return false;
+  if (!serverVerifiedAdminId) return false;
+  return serverVerifiedAdminId === String(userId).trim();
 }
 
 export function getUserAdminPermissions(userId?: string): AdminPermissions | null {
   if (!userId) return null;
   const cleanId = String(userId).trim();
-  
-  // Super Admin has 100% full rights with ZERO restrictions!
-  if (cleanId === SUPER_ADMIN_ID) {
+
+  // 1-QADAM (majburiy): server bu foydalanuvchini admin deb tasdiqladimi?
+  if (!isUserAdmin(cleanId)) return null;
+
+  // 2-QADAM: granular huquqlar. Bu yerda faqat huquqlarni TORAYTIRISH
+  // mumkin — adminlikning o'zi allaqachon yuqorida tasdiqlangan.
+  if (isUserSuperAdmin(cleanId)) {
     return { ...FULL_ADMIN_PERMISSIONS };
   }
 
@@ -1004,18 +1334,9 @@ export function getUserAdminPermissions(userId?: string): AdminPermissions | nul
     return appointed.permissions;
   }
 
-  // Fallback for legacy adminTelegramIds
-  const adminIds = (settings.adminTelegramIds || []).map((id) => String(id).trim());
-  if (adminIds.includes(cleanId)) {
-    return { ...DEFAULT_SUB_ADMIN_PERMISSIONS };
-  }
-
-  return null;
-}
-
-export function isUserAdmin(userId?: string): boolean {
-  if (!userId) return false;
-  return getUserAdminPermissions(userId) !== null;
+  // Server admin deb tasdiqladi, lekin lokal sozlamalarda granular yozuv
+  // yo'q — ehtiyotkorlik uchun eng kam huquqlar beriladi.
+  return { ...DEFAULT_SUB_ADMIN_PERMISSIONS };
 }
 
 export function getAppointedAdmins(): AppointedAdmin[] {
@@ -1031,7 +1352,7 @@ export function saveAppointedAdmin(
     roleTitle: string;
     permissions: AdminPermissions;
   },
-  operatorId: string = SUPER_ADMIN_ID
+  operatorId: string = getSuperAdminId()
 ): { success: boolean; message: string; admin?: AppointedAdmin } {
   const cleanId = String(adminData.id).trim();
   if (!cleanId) {
@@ -1040,7 +1361,7 @@ export function saveAppointedAdmin(
 
   // Check operator rights - only Super Admin or admins with canManageAdmins can appoint/edit admins
   const operatorPerms = getUserAdminPermissions(operatorId);
-  if (!operatorPerms || (!operatorPerms.canManageAdmins && operatorId !== SUPER_ADMIN_ID)) {
+  if (!operatorPerms || (!operatorPerms.canManageAdmins && !isUserSuperAdmin(operatorId))) {
     return { success: false, message: "Adminlarni faqat Bosh Admin tayinlashi yoki o'zgartirishi mumkin!" };
   }
 
@@ -1048,7 +1369,7 @@ export function saveAppointedAdmin(
   const currentList = [...(settings.appointedAdmins || [])];
   const existingIdx = currentList.findIndex((a) => a.id === cleanId);
 
-  const isSuper = cleanId === SUPER_ADMIN_ID;
+  const isSuper = isUserSuperAdmin(cleanId);
   const permissions: AdminPermissions = isSuper ? { ...FULL_ADMIN_PERMISSIONS } : adminData.permissions;
 
   const updatedAdmin: AppointedAdmin = {
@@ -1059,7 +1380,7 @@ export function saveAppointedAdmin(
     isSuperAdmin: isSuper,
     permissions,
     appointedAt: existingIdx >= 0 ? currentList[existingIdx].appointedAt : new Date().toISOString(),
-    appointedBy: operatorId === SUPER_ADMIN_ID ? "Bosh Admin (891846690)" : `Admin #${operatorId}`,
+    appointedBy: isUserSuperAdmin(operatorId) ? 'Bosh Admin' : `Admin #${operatorId}`,
   };
 
   if (existingIdx >= 0) {
@@ -1071,7 +1392,7 @@ export function saveAppointedAdmin(
   // Also sync with adminTelegramIds
   const adminIds = new Set(settings.adminTelegramIds || []);
   adminIds.add(cleanId);
-  adminIds.add(SUPER_ADMIN_ID);
+  if (getSuperAdminId()) adminIds.add(getSuperAdminId());
 
   updateStoredSettings({
     appointedAdmins: currentList,
@@ -1080,7 +1401,7 @@ export function saveAppointedAdmin(
 
   addAuditLog({
     adminId: operatorId,
-    adminName: operatorId === SUPER_ADMIN_ID ? 'Bosh Admin' : 'Admin',
+    adminName: isUserSuperAdmin(operatorId) ? 'Bosh Admin' : 'Admin',
     targetType: 'ADMIN_ROLE',
     targetId: cleanId,
     targetTitle: updatedAdmin.name,
@@ -1098,16 +1419,16 @@ export function saveAppointedAdmin(
 
 export function removeAppointedAdmin(
   adminId: string,
-  operatorId: string = SUPER_ADMIN_ID
+  operatorId: string = getSuperAdminId()
 ): { success: boolean; message: string } {
   const cleanId = String(adminId).trim();
-  if (cleanId === SUPER_ADMIN_ID) {
-    return { success: false, message: "Bosh Admin (891846690) ni o'chirib bo'lmaydi!" };
+  if (isUserSuperAdmin(cleanId)) {
+    return { success: false, message: "Bosh Adminni o'chirib bo'lmaydi!" };
   }
 
   // Check operator rights
   const operatorPerms = getUserAdminPermissions(operatorId);
-  if (!operatorPerms || (!operatorPerms.canManageAdmins && operatorId !== SUPER_ADMIN_ID)) {
+  if (!operatorPerms || (!operatorPerms.canManageAdmins && !isUserSuperAdmin(operatorId))) {
     return { success: false, message: "Adminlarni faqat Bosh Admin o'chira oladi!" };
   }
 
@@ -1122,7 +1443,7 @@ export function removeAppointedAdmin(
 
   addAuditLog({
     adminId: operatorId,
-    adminName: operatorId === SUPER_ADMIN_ID ? 'Bosh Admin' : 'Admin',
+    adminName: isUserSuperAdmin(operatorId) ? 'Bosh Admin' : 'Admin',
     targetType: 'ADMIN_ROLE',
     targetId: cleanId,
     targetTitle: cleanId,
@@ -1170,14 +1491,24 @@ export function checkHasAccess(user: UserProfile, content: ContentItem, episode?
     if (!user.vipExpiresAt) return true;
 
     const expires = new Date(user.vipExpiresAt).getTime();
-    if (!isNaN(expires)) {
-      if (expires > Date.now()) {
-        return true;
-      } else {
-        // Expired! Automatically revoke VIP
-        user.isVip = false;
-        saveStoredCurrentUser(user);
-      }
+    // ═══ TUZATILDI: BU FUNKSIYA RENDER PAYTIDA localStorage'GA YOZARDI ═══
+    //
+    // ESKI KOD muddat o'tgan bo'lsa shu yerda:
+    //     user.isVip = false;              // <- prop obyektini MUTATSIYA qiladi
+    //     saveStoredCurrentUser(user);     // <- setItem -> 'manyak_storage_update'
+    //                                      //    -> App.refreshData() -> setState
+    //
+    // `checkHasAccess` esa HomeView, SearchView, ShortsFeed va
+    // VideoPlayerModal'ning RENDER TANASIDAN chaqiriladi. Ya'ni render
+    // paytida global holat o'zgartirilib, React'da qayta render zanjiri
+    // (ba'zi hollarda cheksiz tsikl) yuzaga kelardi.
+    //
+    // Endi bu funksiya SOF (pure): faqat o'qiydi va hisoblaydi. Muddati
+    // o'tgan obunani yopish serverning ishi (`Users.expireSubscriptions`
+    // har soatda + `/api/me/entitlements` har so'rovda) va u
+    // `syncEntitlementsFromServer()` orqali keshga tushadi.
+    if (!isNaN(expires) && expires > Date.now()) {
+      return true;
     }
   }
 
@@ -1220,72 +1551,115 @@ export function clearWatchHistory(userId: string): void {
 }
 
 // 7. RECEIPTS / PAYMENTS
-const INITIAL_RECEIPTS: PaymentReceipt[] = [
-  {
-    id: 'rcpt_demo_1',
-    userId: '109283741',
-    userName: 'Akmal Karimov',
-    userPhone: '+998971234567',
-    type: 'vip_subscription',
-    planId: 'plan_1_month',
-    planName: '1 Oylik VIP',
-    amount: 39000,
-    receiptImageUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=600&auto=format&fit=crop&q=80',
-    notes: 'Karta orqali Clickdan o\'tkazdim',
-    status: 'approved',
-    createdAt: new Date(Date.now() - 3600000 * 5).toISOString(),
-    reviewedAt: new Date(Date.now() - 3600000 * 4).toISOString(),
-    reviewedBy: '891846690',
-  },
-  {
-    id: 'rcpt_demo_2',
-    userId: '992831021',
-    userName: 'Sardor Rustamov',
-    userPhone: '+998934567890',
-    type: 'single_content',
-    contentId: 'sd-milliarder-kuyov',
-    contentTitle: 'Milliarder Kuyovning Qasosi',
-    amount: 19000,
-    receiptImageUrl: 'https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=600&auto=format&fit=crop&q=80',
-    notes: 'Short drama uchun to\'lov cheki',
-    status: 'pending',
-    createdAt: new Date(Date.now() - 3600000 * 1).toISOString(),
-  },
-];
+// Demo cheklar ham olib tashlandi: ular boshqa odamlarning ismi, telefon
+// raqami va to'lov summasini har bir klientning localStorage'iga yozardi.
+// Cheklar faqat serverdan keladi (`GET /api/receipts`, admin himoyasi ostida).
+const INITIAL_RECEIPTS: PaymentReceipt[] = [];
 
 export function getStoredReceipts(): PaymentReceipt[] {
   return getItem<PaymentReceipt[]>(KEYS.RECEIPTS, INITIAL_RECEIPTS);
 }
 
-export function submitPaymentReceipt(
-  receiptData: Omit<PaymentReceipt, 'id' | 'createdAt' | 'status'>
-): PaymentReceipt {
-  const all = getStoredReceipts();
-  const newReceipt: PaymentReceipt = {
-    ...receiptData,
-    id: `rcpt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-    status: 'pending',
-    createdAt: new Date().toISOString(),
+/**
+ * Serverdagi chek qatorini (snake_case) frontend tipiga (camelCase) o'giradi.
+ * Backend `receipts` jadvalini xom holda qaytaradi, frontend esa camelCase
+ * `PaymentReceipt` tipini kutadi — mapping bo'lmasa UI maydonlarni o'qiy olmaydi.
+ */
+function receiptRowToClient(row: Record<string, unknown>): PaymentReceipt {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id ?? row.userId ?? ''),
+    userName: String(row.user_name ?? row.userName ?? ''),
+    userPhone: (row.user_phone ?? row.userPhone ?? undefined) as string | undefined,
+    type: (row.type ?? 'vip_subscription') as PaymentReceipt['type'],
+    planId: (row.plan_id ?? row.planId ?? undefined) as string | undefined,
+    planName: (row.plan_name ?? row.planName ?? undefined) as string | undefined,
+    contentId: (row.content_id ?? row.contentId ?? undefined) as string | undefined,
+    contentTitle: (row.content_title ?? row.contentTitle ?? undefined) as string | undefined,
+    amount: Number(row.amount ?? 0),
+    discountApplied: Number(row.discount_applied ?? row.discountApplied ?? 0),
+    promoCodeUsed: (row.promo_code_used ?? row.promoCodeUsed ?? undefined) as string | undefined,
+    receiptImageUrl: String(row.receipt_image_url ?? row.receiptImageUrl ?? ''),
+    notes: (row.notes ?? undefined) as string | undefined,
+    status: (row.status ?? 'pending') as PaymentReceipt['status'],
+    createdAt: String(row.created_at ?? row.createdAt ?? new Date().toISOString()),
+    reviewedAt: (row.reviewed_at ?? row.reviewedAt ?? undefined) as string | undefined,
+    reviewedBy: (row.reviewed_by ?? row.reviewedBy ?? undefined) as string | undefined,
   };
-  all.unshift(newReceipt);
-  setItem(KEYS.RECEIPTS, all);
+}
 
-  // Sync to Backend (SQLite)
-  if (typeof window !== 'undefined') {
-    getAuthHeaders().then((authHeaders) => {
-      fetch('/api/sync-receipt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders },
-        body: JSON.stringify(newReceipt)
-      }).catch(console.error);
-    });
+/**
+ * To'lov chekini yuboradi.
+ *
+ * ═══ QAYTA YOZILDI: SERVER BIRINCHI, KESH KEYIN ═══
+ *
+ * ESKI KOD localStorage'ga yozib, keyin serverga "otib yuborardi"
+ * (fire-and-forget) va natijani KUTMASDAN chekni qaytarardi:
+ *
+ *   all.unshift(newReceipt);
+ *   setItem(KEYS.RECEIPTS, all);              // <- kvota tugasa jimgina yiqiladi
+ *   getAuthHeaders().then(() => fetch('/api/sync-receipt', ...).catch(console.error));
+ *   return newReceipt;                        // <- doim "muvaffaqiyat"
+ *
+ * Oqibatlari:
+ *  - chek rasmi base64 bo'lgani uchun `setItem` localStorage kvotasini yorib,
+ *    yozuv SAQLANMAY qolardi — lekin funksiya baribir chekni qaytarardi va
+ *    UI "yuborildi" deb ko'rsatardi;
+ *  - server so'rovi 401/500 bo'lsa ham foydalanuvchi buni bilmasdi;
+ *  - chek `id` si klientda yaratilardi, ya'ni ikki qurilma bir xil id
+ *    yaratishi (yoki foydalanuvchi id ni o'zi tanlashi) mumkin edi.
+ *
+ * Endi: chek AVVAL serverga yoziladi (id ham serverda yaratiladi), va faqat
+ * muvaffaqiyatdan keyin localStorage keshiga qo'shiladi. Xato bo'lsa
+ * `throw` qiladi — chaqiruvchi (PaymentModal) foydalanuvchiga ko'rsatadi.
+ */
+export async function submitPaymentReceipt(
+  receiptData: Omit<PaymentReceipt, 'id' | 'createdAt' | 'status'>
+): Promise<PaymentReceipt> {
+  const authHeaders = await getAuthHeaders();
+
+  // Telegram tashqarisida token bo'lmaydi — bu holda chekni yuborish
+  // MUMKIN EMAS. Ilgari so'rov baribir yuborilib, server 401 qaytarardi va
+  // xato `console.error` da qolardi.
+  if (!authHeaders.Authorization) {
+    throw new Error(
+      "Tizimga kirilmagan. Chek yuborish uchun ilovani Telegram bot orqali ochishingiz kerak."
+    );
   }
 
-  // Send new receipt alert & /approve_<id> command to Telegram Bot
-  const settings = getStoredSettings();
-  notifyReceiptSubmissionViaTelegram(newReceipt, settings).catch((err) => {
-    console.warn('[TelegramBot] Failed to send submission alert:', err);
-  });
+  let res: Response;
+  try {
+    res = await fetch('/api/receipts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify(receiptData),
+    });
+  } catch {
+    throw new Error('Serverga ulanib bo\'lmadi. Internet aloqasini tekshiring.');
+  }
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok || !data.receipt) {
+    throw new Error(data?.error || `Server xatosi (${res.status})`);
+  }
+
+  const newReceipt = receiptRowToClient(data.receipt);
+
+  // Kesh: server javobini localStorage'ga qo'shamiz. Bu yozuv MUVAFFAQIYATSIZ
+  // bo'lsa ham chek allaqachon serverda — shuning uchun faqat ogohlantiramiz.
+  try {
+    const all = getStoredReceipts();
+    all.unshift(newReceipt);
+    setItem(KEYS.RECEIPTS, all);
+  } catch (err) {
+    console.warn('[Receipts] Keshga yozilmadi (chek serverda saqlangan):', err);
+  }
+
+  // Adminlarga Telegram xabarnomasi endi SERVER tomonida yuboriladi
+  // (`POST /api/receipts` -> `broadcastToAdmins` + bot). Ilgari bu yerda
+  // brauzerdan bot tokeni bilan yuborilardi — token oshkor bo'lardi va
+  // chek rasmi base64 "data:" URL bo'lgani uchun adminga umuman
+  // yetib bormasdi.
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('manyak_storage_update'));
@@ -1352,10 +1726,9 @@ export function reviewReceipt(
       saveStoredCurrentUser({ ...current, ...targetUser });
     }
 
-    // 2. Send subscription confirmation command & message to Telegram Bot
-    notifyReceiptApprovedViaTelegram(rcpt, settings).catch((err) => {
-      console.warn('[TelegramBot] Failed to send approval confirmation:', err);
-    });
+    // 2. Telegram xabarnomasi endi SERVER tomonida yuboriladi
+    //    (`PUT /api/receipts/:id/review` -> `sendToUser` + bot xabari).
+    //    Ilgari bu yerda brauzerdan, bot tokeni bilan yuborilardi.
 
     // 3. Dispatch in-app subscription confirmation command & storage update
     if (typeof window !== 'undefined') {
@@ -1383,11 +1756,7 @@ export function reviewReceipt(
       window.dispatchEvent(new CustomEvent('manyak_storage_update'));
     }
   } else {
-    // Rejected: send Telegram message to user
-    notifyReceiptRejectedViaTelegram(rcpt, settings).catch((err) => {
-      console.warn('[TelegramBot] Failed to send rejection notice:', err);
-    });
-
+    // Rad etilganda ham xabarnoma SERVER tomonidan yuboriladi.
     if (typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('manyak_payment_status_update', {
@@ -1601,11 +1970,19 @@ export function getDailyCheckInStatus(user: UserProfile): CheckInStatus {
     currentStreak = 0;
     nextDayToClaim = 1;
 
-    // Reset stored streak to 0 if they missed a day
-    if (user.dailyCheckIn && user.dailyCheckIn.streak > 0 && lastDate && lastDate !== todayStr && lastDate !== yesterdayStr) {
-      user.dailyCheckIn.streak = 0;
-      saveStoredUser(user);
-    }
+    // ═══ TUZATILDI: RENDER PAYTIDA localStorage'GA YOZISH ═══
+    // ESKI KOD shu yerda streak'ni nolga tushirib `saveStoredUser(user)`
+    // chaqirardi. `getDailyCheckInStatus` esa DailyCheckInWidget'ning
+    // `useState(...)` boshlang'ich qiymatida chaqiriladi — ya'ni render
+    // paytida global holat o'zgarib, `manyak_storage_update` hodisasi
+    // App.refreshData() ni ishga tushirardi, u yangi `user` obyekti
+    // qaytarardi, widget'ning `useEffect([user])` esa yana shu funksiyani
+    // chaqirardi. Tsikl faqat ikkinchi o'tishda `streak === 0` bo'lgani
+    // uchun to'xtardi — juda mo'rt.
+    //
+    // Endi bu funksiya SOF: streak uzilganini shunchaki HISOBLAB qaytaradi
+    // (`currentStreak = 0`), hech narsa yozmaydi. Haqiqiy qiymat keyingi
+    // `claimDailyCheckInReward` chaqiruvida serverda hisoblanadi.
   }
 
   const rewardIndex = Math.max(0, Math.min(6, nextDayToClaim - 1));
@@ -1714,75 +2091,84 @@ export function claimDailyCheckInReward(userId: string): {
   };
 }
 
-// Spend 1 Access Token to unlock ONLY 1 specific episode or 1 movie
-// Qoida: 1 ta token to'liq serialni emas, faqat 1 qismini ocha olsin.
-// Qolgan seriallarga va shu serialning boshqa qismlariga o'tmasin.
-// Xohlasa 10-qism, xohlasa 20-qism, faqat tanlangan 1 ta serialda 1 ta qism ochilsin!
-export function useAccessTokenToUnlock(
+// ═══════════════════════════════════════════════════════════════════════════
+//  TOKEN BILAN 1 TA QISMNI OCHISH — SERVER TOMONIDA
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ESKI KODDA 3 TA XATO BOR EDI:
+//
+// 1) PUL OQISHI: `unlockedEpisodeIds` ga `${contentId}:${episodeId}` bilan
+//    BIR QATORDA yalang'och `episodeId` ham qo'shilardi:
+//        user.unlockedEpisodeIds.push(epTokenKey);
+//        user.unlockedEpisodeIds.push(episodeId);   // <- XATO
+//    `checkHasAccess` esa yalang'och id ni ham qabul qiladi. Qism id'lari
+//    ('ep1', 'ep2', ...) seriallar orasida takrorlanganligi uchun, A
+//    serialning 1-qismini token bilan ochgan odam BARCHA seriallarning
+//    1-qismini bepul ko'ra olardi. Bu funksiya ustidagi izohda yozilgan
+//    qoidaga to'g'ridan-to'g'ri qarama-qarshi.
+//
+// 2) BUTUNLAY KLIENT TOMONIDA: token hisobi va ochilgan qismlar
+//    localStorage'da kamaytirilardi/qo'shilardi. Konsoldan
+//    `accessTokens: 999` yozib, cheksiz qism ochish mumkin edi.
+//
+// 3) `use` PREFIKSI: nomi `use...` bilan boshlanadi, lekin bu React hook
+//    emas — `onClick` ichida chaqirilgani uchun `react-hooks/rules-of-hooks`
+//    lint qoidasi buzilardi. Yangi nom: `spendTokenToUnlock`.
+//
+// ENDI: server `POST /api/tokens/unlock` da tokenni kamaytiradi va faqat
+// `contentId:episodeId` kalitini saqlaydi (yalang'och id YO'Q — buni
+// server testida tasdiqladim). Klient natijani keshga yozadi.
+export async function spendTokenToUnlock(
   userId: string,
   contentId: string,
   title?: string,
   episodeId?: string,
   episodeTitle?: string
-): { success: boolean; message: string; user?: UserProfile } {
-  const allUsers = getStoredUsers();
-  let user = allUsers.find((u) => u.id === userId);
-  const current = getStoredCurrentUser();
-
-  if (!user && (current.id === userId)) {
-    user = current;
-  }
-  if (!user) {
-    return { success: false, message: "Foydalanuvchi topilmadi." };
-  }
-
-  if (!user.accessTokens || user.accessTokens < 1) {
+): Promise<{ success: boolean; message: string; user?: UserProfile }> {
+  const authHeaders = await getAuthHeaders();
+  if (!authHeaders.Authorization) {
     return {
       success: false,
-      message: "Sizda yetarli bepul ko'rish tokenlari mavjud emas! Kunlik bonusdan har kuni token oling.",
+      message: "Tizimga kirilmagan. Tokendan foydalanish uchun ilovani Telegram bot orqali ochingiz.",
     };
   }
 
-  user.accessTokens -= 1;
-
-  if (episodeId) {
-    // FAQAT 1 TA QISMNI OCHISH:
-    // Serialning butun ID si purchasedContentIds ga qo'shilmaydi!
-    // Faqat ushbu aniq qism identifikatori unlockedEpisodeIds ga qo'shiladi!
-    if (!user.unlockedEpisodeIds) user.unlockedEpisodeIds = [];
-    const epTokenKey = `${contentId}:${episodeId}`;
-    if (!user.unlockedEpisodeIds.includes(epTokenKey)) {
-      user.unlockedEpisodeIds.push(epTokenKey);
-    }
-    if (!user.unlockedEpisodeIds.includes(episodeId)) {
-      user.unlockedEpisodeIds.push(episodeId);
-    }
-  } else {
-    // Alohida film (bitta to'liq kino) ochilishi
-    if (!user.purchasedContentIds) user.purchasedContentIds = [];
-    if (!user.purchasedContentIds.includes(contentId)) {
-      user.purchasedContentIds.push(contentId);
-    }
+  let res: Response;
+  try {
+    res = await fetch('/api/tokens/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ userId, contentId, episodeId, title, episodeTitle }),
+    });
+  } catch {
+    return { success: false, message: "Serverga ulanib bo'lmadi. Internet aloqasini tekshiring." };
   }
 
-  saveStoredUser(user);
+  if (res.status === 401) invalidateAuthToken();
 
-  if (current.id === userId) {
-    saveStoredCurrentUser({ ...current, ...user });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok) {
+    return {
+      success: false,
+      message: data?.message || data?.error || `Qismni ochib bo'lmadi (status ${res.status}).`,
+    };
   }
 
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('manyak_storage_update'));
-  }
+  // Server yangi holatni qaytardi — keshni ANIQ shu qiymat bilan yangilaymiz
+  await syncEntitlementsFromServer();
 
   const detailText = episodeTitle
     ? `"${title || 'Serial'}"ning ${episodeTitle}i`
     : `"${title || 'Tanlangan kontent'}"`;
 
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('manyak_storage_update'));
+  }
+
   return {
     success: true,
     message: `1 ta Token sarflandi. Faqat ${detailText} ochildi! Serialning boshqa qismlariga o'tmaydi.`,
-    user,
+    user: getItem<UserProfile | null>(KEYS.CURRENT_USER, null) || undefined,
   };
 }
 
