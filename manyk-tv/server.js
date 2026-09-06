@@ -10,7 +10,6 @@
 // ya'ni ./database.js ichidagi kod dotenv.config() ishlashidan OLDIN ishga
 // tushardi. Natijada .env dagi SUPER_ADMIN_ID, JWT_SECRET va boshqa
 // o'zgaruvchilar database.js ga umuman yetib bormas edi (jiddiy bug).
-import 'dotenv/config';
 
 import express from 'express';
 import { createServer } from 'http';
