@@ -210,8 +210,83 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // BROADCAST STATE
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [broadcastTargetContent, setBroadcastTargetContent] = useState<string>(''); // content id
+  // YANGI: mini drama va seriallar uchun aniq QISMNI belgilash —
+  // havola to'g'ridan-to'g'ri o'sha qismni ochadi.
+  const [broadcastTargetEpisode, setBroadcastTargetEpisode] = useState<string>('');
+  // Afishani xabarga qo'shish (server rasmni fayl sifatida yuklaydi)
+  const [broadcastAttachPoster, setBroadcastAttachPoster] = useState(true);
+  // Yangi qo'shilgan kinolarni tez topish uchun qidiruv
+  const [broadcastSearch, setBroadcastSearch] = useState('');
   const [broadcastStatus, setBroadcastStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [broadcastStatusMessage, setBroadcastStatusMessage] = useState('');
+
+  // ─── BROADCAST: HOSILA QIYMATLAR ──────────────────────────────────────
+  // Tanlangan kontent — afisha previyusi va tugmalar uchun kerak.
+  const broadcastSelectedContent = useMemo(
+    () => contents.find((c) => c.id === broadcastTargetContent) || null,
+    [contents, broadcastTargetContent],
+  );
+
+  // Kontent ro'yxati: eng YANGI qo'shilganlar yuqorida, qidiruv bo'yicha
+  // filtrlanadi, oxirgi 7 kunda qo'shilganlar 🆕 belgisini oladi.
+  // Shu tarzda admin yangi qo'shilgan kinoni darhol topadi.
+  const broadcastContentOptions = useMemo(() => {
+    const TYPE_LABELS: Record<ContentType, string> = {
+      movie: 'Kino',
+      series: 'Serial',
+      short_drama: 'Mini drama',
+      anime_series: 'Anime',
+    };
+    const NEW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 kun
+    const now = Date.now();
+    const query = broadcastSearch.trim().toLowerCase();
+
+    const toOption = (c: ContentItem) => {
+      const parsed = c.createdAt ? new Date(c.createdAt).getTime() : NaN;
+      const createdMs = Number.isFinite(parsed) ? parsed : 0;
+      return {
+        id: c.id,
+        title: c.title,
+        typeLabel: TYPE_LABELS[c.type] || c.type,
+        episodeCount: c.episodes?.length || 0,
+        isNew: createdMs > 0 && now - createdMs <= NEW_WINDOW_MS,
+        createdMs,
+      };
+    };
+
+    const matched = contents.filter((c) => {
+      if (!query) return true;
+      return (
+        c.title.toLowerCase().includes(query) ||
+        (c.originalTitle || '').toLowerCase().includes(query)
+      );
+    });
+
+    // Tanlangan kontent qidiruvdan tushib qolsa ham ro'yxatda qoladi —
+    // aks holda <select> bo'sh ko'rinadi, lekin xabarga baribir biriktirilgan
+    // bo'lardi (chalkashtiruvchi holat).
+    if (
+      broadcastSelectedContent &&
+      !matched.some((c) => c.id === broadcastSelectedContent.id)
+    ) {
+      matched.push(broadcastSelectedContent);
+    }
+
+    return matched.map(toOption).sort((a, b) => b.createdMs - a.createdMs);
+  }, [contents, broadcastSearch, broadcastSelectedContent]);
+
+  // Tanlangan kontentning qismlari (mini drama / serial) — raqam bo'yicha tartibda.
+  const broadcastEpisodes = useMemo<Episode[]>(() => {
+    const list = broadcastSelectedContent?.episodes;
+    if (!list || list.length === 0) return [];
+    return [...list].sort((a, b) => (a.episodeNumber || 0) - (b.episodeNumber || 0));
+  }, [broadcastSelectedContent]);
+
+  // Aniq belgilangan qism — previyuda ko'rsatiladi va havolaga qo'shiladi.
+  const broadcastSelectedEpisode = useMemo(
+    () => broadcastEpisodes.find((ep) => ep.id === broadcastTargetEpisode) || null,
+    [broadcastEpisodes, broadcastTargetEpisode],
+  );
 
   // AUDIT TRAIL STATE
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
@@ -991,45 +1066,45 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       onConfirm: async () => {
         try {
           setBroadcastStatus('sending');
-          let photoUrl = '';
-          let buttonUrl = '';
-          let buttonText = "🎬 Tomosha qilish";
 
-          if (broadcastTargetContent) {
-            const c = contents.find(c => c.id === broadcastTargetContent);
-            if (c) {
-              photoUrl = c.posterUrl;
-              // Web app link to content - Telegram dislikes localhost, so we use a dummy domain for local testing
-              const origin = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
-                ? 'https://t.me/Manyaktvbot' 
-                : window.location.origin;
-              
-              buttonUrl = origin === 'https://t.me/Manyaktvbot' 
-                ? 'https://t.me/Manyaktvbot' 
-                : `${origin}?content=${c.id}`;
-            }
-          }
-
+          // ═══ QAYTA YOZILDI ═══
+          // ESKI KOD poster manzilini va tugma havolasini KLIENTDA yasardi:
+          //   - `photoUrl = c.posterUrl` — nisbiy manzil ("/uploads/x.jpg")
+          //     bo'lgani uchun server uni rasm deb qabul qilmasdi va afisha
+          //     xabarga QO'SHILMASDI;
+          //   - `buttonUrl` — oddiy `url` havola edi, ya'ni Telegram uni
+          //     TASHQI brauzerda ochardi va foydalanuvchi ilovadan chiqib
+          //     ketardi. Localhost uchun esa umuman bot havolasiga
+          //     almashtirilardi.
+          // Endi server kontentni bazadan o'zi topadi, afishani FAYL
+          // sifatida yuklaydi va `web_app` tugmasini yasaydi (ilova
+          // Telegram ICHIDA ochiladi).
           const res = await fetch('/api/broadcast', {
             method: 'POST',
-            headers: { 
+            headers: {
               'Content-Type': 'application/json',
               ...(await getAuthHeaders()),
             },
             body: JSON.stringify({
               text: broadcastMessage,
-              photoUrl,
-              buttonText: broadcastTargetContent ? buttonText : undefined,
-              buttonUrl: broadcastTargetContent ? buttonUrl : undefined
-            })
+              contentId: broadcastTargetContent || undefined,
+              episodeId: broadcastTargetEpisode || undefined,
+              attachPoster: broadcastAttachPoster,
+            }),
           });
           const data = await res.json();
           if (data.ok) {
             setBroadcastStatus('success');
-            setBroadcastStatusMessage(data.message || 'Yuborish boshlandi!');
-            setTimeout(() => setBroadcastStatus('idle'), 3000);
+            const details: string[] = [];
+            if (data.withPoster) details.push('afisha bilan');
+            if (data.opensInApp) details.push('ilova ichida ochiladi');
+            setBroadcastStatusMessage(
+              `${data.message || 'Yuborish boshlandi!'}${details.length ? ` (${details.join(', ')})` : ''}`
+            );
+            setTimeout(() => setBroadcastStatus('idle'), 5000);
             setBroadcastMessage('');
             setBroadcastTargetContent('');
+            setBroadcastTargetEpisode('');
           } else {
             throw new Error(data.error || 'Noma`lum xato');
           }
@@ -4541,26 +4616,98 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           <div className="max-w-2xl bg-zinc-900/80 border border-zinc-800/80 rounded-3xl p-5 sm:p-6">
             <form onSubmit={handleSendBroadcast} className="space-y-5">
               
-              {/* Kino tanlash */}
+              {/* ═══ KONTENT TANLASH — YANGI QO'SHILGANLARNI TEZ TOPISH ═══
+                * ESKI KOD oddiy <select> edi va butun ro'yxatni tartibsiz
+                * ko'rsatardi — yangi qo'shilgan kinoni topish qiyin bo'lardi.
+                * Endi: qidiruv + eng yangilari yuqorida + "YANGI" belgisi. */}
               <div>
                 <label className="block text-xs font-bold text-zinc-300 mb-1.5 flex items-center gap-1.5">
                   <Film className="w-4 h-4 text-zinc-400" />
-                  Kino yoki Serialni tanlang (ixtiyoriy)
+                  Kino / Serial (ixtiyoriy)
                 </label>
+
+                <div className="relative mb-2">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
+                  <input
+                    type="text"
+                    value={broadcastSearch}
+                    onChange={(e) => setBroadcastSearch(e.target.value)}
+                    placeholder="Nomi bo'yicha qidirish..."
+                    className="w-full pl-9 pr-3 py-2 bg-zinc-950 border border-zinc-700/80 rounded-xl text-xs text-white placeholder:text-zinc-500 outline-none focus:border-indigo-500"
+                  />
+                </div>
+
                 <select
                   value={broadcastTargetContent}
-                  onChange={(e) => setBroadcastTargetContent(e.target.value)}
+                  onChange={(e) => {
+                    setBroadcastTargetContent(e.target.value);
+                    setBroadcastTargetEpisode(''); // kontent o'zgarsa qism tanlovi tozalanadi
+                  }}
                   className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-indigo-500 transition"
                 >
                   <option value="">-- Faqat matnli xabar --</option>
-                  {contents.map(c => (
-                    <option key={c.id} value={c.id}>{c.title} ({c.type === 'movie' ? 'Kino' : 'Serial'})</option>
+                  {broadcastContentOptions.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.isNew ? '🆕 ' : ''}{c.title} · {c.typeLabel}{c.episodeCount ? ` · ${c.episodeCount} qism` : ''}
+                    </option>
                   ))}
                 </select>
                 <p className="text-[10px] text-zinc-500 mt-1.5">
-                  Agar kino tanlasangiz, uning rasmi (posteri) va "🎬 Tomosha qilish" tugmasi xabarga avtomatik qo'shiladi.
+                  Eng yangi qo'shilganlar yuqorida. 🆕 — oxirgi 7 kunda qo'shilgan.
                 </p>
               </div>
+
+              {/* ═══ YANGI: QISMNI BELGILASH (mini drama va seriallar) ═══
+                * Havola to'g'ridan-to'g'ri shu qismni ochadi. */}
+              {broadcastEpisodes.length > 0 && (
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1.5 flex items-center gap-1.5">
+                    <Layers className="w-4 h-4 text-amber-400" />
+                    Qismni belgilash (havola shu qismni ochadi)
+                  </label>
+                  <select
+                    value={broadcastTargetEpisode}
+                    onChange={(e) => setBroadcastTargetEpisode(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-amber-500 transition"
+                  >
+                    <option value="">-- Boshidan (1-qism) --</option>
+                    {broadcastEpisodes.map((ep, idx) => (
+                      <option key={ep.id} value={ep.id}>
+                        {ep.episodeNumber || idx + 1}-qism{ep.title ? ` · ${ep.title}` : ''}{ep.isFree ? ' · bepul' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* ═══ AFISHA — AVTOMATIK YUKLANADI ═══
+                * ESKI KOD posterni URL sifatida yuborardi, yuklangan rasmlar
+                * esa nisbiy manzilda ("/uploads/...") — shuning uchun ular
+                * xabarga QO'SHILMASDI. Endi server rasmni FAYL sifatida
+                * Telegramga yuklaydi (va file_id ni qayta ishlatadi). */}
+              {broadcastSelectedContent && (
+                <label className="flex items-start gap-3 p-3 rounded-xl bg-zinc-950 border border-zinc-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={broadcastAttachPoster}
+                    onChange={(e) => setBroadcastAttachPoster(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-indigo-500"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold text-zinc-200">Afishani xabarga qo'shish</div>
+                    <div className="text-[10px] text-zinc-500 mt-0.5">
+                      Kino posteri rasm sifatida avtomatik yuklanadi
+                    </div>
+                  </div>
+                  {broadcastSelectedContent.posterUrl && (
+                    <img
+                      src={broadcastSelectedContent.posterUrl}
+                      alt=""
+                      className="w-10 h-14 object-cover rounded-lg border border-zinc-700 flex-shrink-0"
+                    />
+                  )}
+                </label>
+              )}
 
               {/* Matn */}
               <div>
@@ -4597,24 +4744,65 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </div>
             </form>
 
-            {broadcastTargetContent && (
+            {/* ═══ PREVYU — IXCHAM TUGMALAR BILAN ═══
+              * Foydalanuvchining huquqiga qarab tugmalar farq qiladi:
+              *   VIP yoki sotib olgan  -> "▶️ Tomosha qilish"
+              *   VIP olmagan           -> "💎 VIP olish" + "👁 Ko'rish"
+              * Ikkisi ham bitta qatorda (ixcham) va `web_app` turida —
+              * ya'ni ilova Telegram ICHIDA ochiladi, tashqi brauzerga
+              * olib ketmaydi. */}
+            {broadcastSelectedContent && (
               <div className="mt-8 p-4 rounded-2xl bg-zinc-950 border border-zinc-800">
-                <p className="text-[10px] text-zinc-500 uppercase font-bold mb-3">Xabar qanday ko'rinadi (Prevyu):</p>
-                <div className="max-w-xs mx-auto bg-[#18222d] rounded-2xl overflow-hidden shadow-2xl relative border border-zinc-800">
-                  <img 
-                    src={contents.find(c => c.id === broadcastTargetContent)?.posterUrl} 
-                    alt="poster" 
-                    className="w-full aspect-[4/5] object-cover"
-                  />
-                  <div className="p-3">
-                    <p className="text-sm text-white whitespace-pre-wrap">{broadcastMessage || "Xabar matni..."}</p>
+                <p className="text-[10px] text-zinc-500 uppercase font-bold mb-3">
+                  Xabar qanday ko'rinadi
+                </p>
+                <div className="max-w-xs mx-auto bg-[#18222d] rounded-2xl overflow-hidden shadow-2xl border border-zinc-800">
+                  {broadcastAttachPoster && broadcastSelectedContent.posterUrl && (
+                    <img
+                      src={broadcastSelectedContent.posterUrl}
+                      alt="afisha"
+                      className="w-full aspect-[4/5] object-cover"
+                    />
+                  )}
+                  <div className="p-3 space-y-1">
+                    <p className="text-sm text-white whitespace-pre-wrap break-words">
+                      {broadcastMessage || 'Xabar matni...'}
+                    </p>
+                    <p className="text-sm text-white font-bold">🎬 {broadcastSelectedContent.title}</p>
+                    {broadcastSelectedEpisode && (
+                      <p className="text-xs text-zinc-300">
+                        📺 {broadcastSelectedEpisode.title ||
+                          `${broadcastSelectedEpisode.episodeNumber || ''}-qism`}
+                      </p>
+                    )}
                   </div>
+
+                  {/* VIP bo'lganlar ko'radigan tugma */}
+                  <div className="px-3 pb-2">
+                    <div className="text-[9px] text-zinc-500 mb-1">VIP / sotib olganlar:</div>
+                    <div className="w-full py-2 rounded-lg bg-[#2b5278] text-white text-center text-xs font-semibold">
+                      ▶️ Tomosha qilish
+                    </div>
+                  </div>
+
+                  {/* VIP bo'lmaganlar ko'radigan tugmalar */}
                   <div className="px-3 pb-3">
-                    <div className="w-full py-2.5 rounded-lg bg-[#2b5278] text-white text-center text-sm font-semibold">
-                      🎬 Tomosha qilish
+                    <div className="text-[9px] text-zinc-500 mb-1">VIP olmaganlar:</div>
+                    <div className="flex gap-1.5">
+                      <div className="flex-1 py-2 rounded-lg bg-[#2b5278] text-white text-center text-xs font-semibold">
+                        💎 VIP olish
+                      </div>
+                      <div className="flex-1 py-2 rounded-lg bg-[#2b5278] text-white text-center text-xs font-semibold">
+                        👁 Ko'rish
+                      </div>
                     </div>
                   </div>
                 </div>
+
+                <p className="text-[10px] text-zinc-500 mt-3 text-center leading-relaxed">
+                  Tugmalar <b>ilova ichida</b> ochiladi (tashqi brauzerga olib ketmaydi)
+                  {broadcastSelectedEpisode ? ' va to\'g\'ridan-to\'g\'ri belgilangan qismga o\'tadi' : ''}.
+                </p>
               </div>
             )}
           </div>

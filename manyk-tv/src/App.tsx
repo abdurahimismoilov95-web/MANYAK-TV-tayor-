@@ -5,6 +5,7 @@ import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { ContentDetailsModal } from './components/ContentDetailsModal';
 import { PaymentModal } from './components/PaymentModal';
 import { TelegramVerificationModal } from './components/TelegramVerificationModal';
+import { TelegramOnlyGate } from './components/TelegramOnlyGate';
 import { TelegramAuthModal } from './components/TelegramAuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -51,6 +52,7 @@ import {
   checkAccessSecurity,
   getOrCreateDeviceFingerprint,
   initSecurityGuards,
+  isRunningInTelegram,
 } from './services/deviceSecurity';
 import { getAuthHeaders, getBackendAuthToken } from './services/authToken';
 import {
@@ -88,6 +90,11 @@ export default function App() {
   const [paymentTargetContent, setPaymentTargetContent] = useState<ContentItem | null>(null);
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [isPhoneModalOpen, setIsPhoneModalOpen] = useState(false);
+  // Admin brauzerdan kirmoqchi bo'lganda "Telegramda ochingiz" ekranini
+  // vaqtincha yopib, tasdiqlash oynasini ko'rsatish uchun.
+  // (Bu hech qanday huquq bermaydi — token faqat serverdan, admin
+  // tekshiruvidan keyin keladi.)
+  const [isTelegramGateBypassed, setIsTelegramGateBypassed] = useState(false);
   const [isTelegramAuthModalOpen, setIsTelegramAuthModalOpen] = useState(false);
   const [detailsModalContent, setDetailsModalContent] = useState<ContentItem | null>(null);
 
@@ -134,9 +141,57 @@ export default function App() {
     setReceipts(getStoredReceipts());
     const currentUser = getStoredCurrentUser();
     setUser(currentUser);
-    if (!currentUser.isPhoneVerified) {
-      setIsPhoneModalOpen(true);
+    // ═══ TUZATILGAN XATO: TASDIQLASH QAYTA-QAYTA SO'RALARDI ═══
+    //
+    // ESKI KOD shu yerda turgan edi:
+    //     if (!currentUser.isPhoneVerified) setIsPhoneModalOpen(true);
+    //
+    // `refreshData()` esa faqat ilova ochilganda emas, BALKI:
+    //   - har 'manyak_storage_update' hodisasida (kesh har yozilganda),
+    //   - har 60 sekundlik entitlement sinxronizatsiyasida,
+    //   - chek/to'lov holati o'zgarganda,
+    //   - foydalanuvchi tortib yangilaganda
+    // chaqiriladi. Ya'ni foydalanuvchi oynani YOPSA HAM keyingi
+    // `refreshData()` uni DARHOL QAYTA OCHARDI — cheksiz bezovta qilish.
+    //
+    // Bundan tashqari kesh boshida hamisha `isPhoneVerified: false` bo'ladi
+    // (haqiqiy holat serverdan keladi), shuning uchun ALLAQACHON tasdiqlagan
+    // foydalanuvchida ham oyna ochilib ketardi.
+    //
+    // Endi qaror faqat SERVER javobiga qarab, bitta joyda va sessiyada
+    // BIR MARTA qabul qilinadi — pastdagi `maybePromptVerification()`.
+  }, []);
+
+  // ═══ TASDIQLASHNI SO'RASH: FAQAT SERVER "TASDIQLANMAGAN" DESA ═══
+  //
+  // Talab: bir marta tasdiqlangan foydalanuvchidan boshqa hech qachon
+  // so'ralmasin (hatto botni o'chirib tashlab, qayta /start bosgan
+  // bo'lsa ham). `isPhoneVerified` serverda (SQLite) saqlanadi va
+  // `SERVER_OWNED_USER_FIELDS` ro'yxatida — klient uni o'zgartira olmaydi.
+  // Shuning uchun yagona ishonchli manba — server javobi.
+  //
+  // Muhim: token bo'lmasa yoki tarmoq yo'q bo'lsa (`ent === null`) oyna
+  // OCHILMAYDI. Aks holda oflayn foydalanuvchi tasdiqlangan bo'lsa ham
+  // bezovta qilinardi.
+  const verifyPromptShownRef = React.useRef(false);
+
+  const maybePromptVerification = useCallback((ent: { isPhoneVerified: boolean } | null) => {
+    // `ent === null` — token yo'q yoki tarmoq uzilgan, ya'ni serverdagi
+    // holat NOMA'LUM. Bunday paytda so'ramaymiz: aks holda tasdiqlagan
+    // foydalanuvchi oflaynda ham qulflanib qolardi.
+    if (!ent) return;
+
+    if (ent.isPhoneVerified) {
+      // Tasdiqlangan — boshqa hech qachon so'ralmaydi.
+      verifyPromptShownRef.current = true;
+      setIsPhoneModalOpen(false);
+      return;
     }
+
+    // Tasdiqlanmagan — sessiyada faqat BIR MARTA ko'rsatamiz.
+    if (verifyPromptShownRef.current) return;
+    verifyPromptShownRef.current = true;
+    setIsPhoneModalOpen(true);
   }, []);
 
   useEffect(() => {
@@ -409,12 +464,18 @@ export default function App() {
     const entitlementInterval = setInterval(() => {
       void syncEntitlementsFromServer().then((ent) => {
         if (ent) refreshData();
+        // Server "tasdiqlangan" desa — oyna yopiladi. "Tasdiqlanmagan" desa
+        // ham qayta bezovta qilmaydi (sessiyada bir marta ko'rsatilgan).
+        maybePromptVerification(ent);
       });
     }, 60000);
 
-    // Ilova ochilganda darhol bir marta
+    // Ilova ochilganda darhol bir marta.
+    // Tasdiqlash oynasini ochish/ochmaslik qarori SHU YERDA — ya'ni
+    // serverdagi haqiqiy holat ma'lum bo'lgandan keyin qabul qilinadi.
     void syncEntitlementsFromServer().then((ent) => {
       if (ent) refreshData();
+      maybePromptVerification(ent);
     });
 
     // Kesh yozilmasa (masalan xotira to'lgan) foydalanuvchini ogohlantiramiz
@@ -468,6 +529,75 @@ export default function App() {
     }
   }, [isAdmin, isAdminPanelOpen]);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  BOT XABARNOMASIDAGI HAVOLANI OCHISH (deep link)
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // Bot xabarnomasidagi tugma `web_app` turida bo'lib, ilovani Telegram
+  // ICHIDA quyidagi manzil bilan ochadi:
+  //     https://<domen>/?content=<kontent_id>&ep=<qism_id>
+  // yoki VIP taklifi uchun:
+  //     https://<domen>/?vip=1
+  //
+  // Bu yerda o'sha parametrlarni o'qib, kerakli kontentni (va tanlangan
+  // qismni) darhol ochamiz. Ilgari bunday imkoniyat YO'Q edi — havola
+  // shunchaki bosh sahifani ochardi va foydalanuvchi e'lon qilingan
+  // kinoni O'ZI qidirishi kerak bo'lardi.
+  //
+  // Huquq tekshiruvi PLEYER ichida bo'ladi (`checkHasAccess`): VIP yoki
+  // sotib olgan bo'lsa video o'ynaydi, aks holda "VIP obuna bo'lish"
+  // ekrani ko'rsatiladi. Ya'ni bu yerda alohida tekshiruv kerak emas.
+  const deepLinkHandledRef = React.useRef(false);
+
+  useEffect(() => {
+    if (deepLinkHandledRef.current) return;
+    // Kontent ro'yxati yuklanmaguncha kutamiz
+    if (contents.length === 0) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const wantedContent = params.get('content');
+    const wantedEpisode = params.get('ep');
+    const wantsVip = params.get('vip');
+
+    if (!wantedContent && !wantsVip) {
+      deepLinkHandledRef.current = true;
+      return;
+    }
+
+    deepLinkHandledRef.current = true;
+
+    if (wantsVip) {
+      setIsPaymentModalOpen(true);
+    } else if (wantedContent) {
+      const item = contents.find((c) => c.id === wantedContent);
+      if (item) {
+        setActiveVideoContent(item);
+        // Qism ko'rsatilgan bo'lsa — aynan shu qismni ochamiz,
+        // aks holda birinchi qismni (yoki kinoning o'zini)
+        const epId =
+          (wantedEpisode && item.episodes?.some((e) => e.id === wantedEpisode) ? wantedEpisode : undefined) ??
+          (item.episodes && item.episodes.length > 0 ? item.episodes[0].id : undefined);
+        setActiveEpisodeId(epId);
+      } else {
+        // Kontent o'chirilgan yoki bu foydalanuvchiga ko'rinmaydi
+        setPaymentToast({
+          id: String(Date.now()),
+          type: 'error',
+          title: 'Kontent topilmadi',
+          message: "E'lon qilingan kino yoki serial mavjud emas.",
+        });
+      }
+    }
+
+    // Manzilni tozalaymiz — sahifa yangilanganda pleyer qayta ochilmasligi
+    // va havola tarixda qolmasligi uchun.
+    try {
+      window.history.replaceState({}, '', window.location.pathname);
+    } catch {
+      // history mavjud bo'lmasa e'tiborsiz qoldiramiz
+    }
+  }, [contents]);
+
   // Handle video selection (Both Movies and Dramas open directly)
   const handleSelectContent = (item: ContentItem, episodeId?: string) => {
     setActiveVideoContent(item);
@@ -488,6 +618,39 @@ export default function App() {
   const shortDramas = contents.filter((c) => c.type === 'short_drama');
 
   // If user or hardware device is banned or not opened via Telegram or HWID mismatch detected
+  // ═══════════════════════════════════════════════════════════════════════
+  //  FAQAT TELEGRAM ICHIDA: brauzerdan kirish faqat adminlarga ochiq
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // TALAB: "bot web app bo'lib ishlasin, saytga otib ketmasin; brauzerdan
+  // kirishni bloklasin; faqat admin va admin tayinlagan odamlarga ochiq".
+  //
+  // Bu yerda faqat KO'RINISH (UX) hal qilinadi — haqiqiy bloklash serverda:
+  //   - GET /api/contents, /api/plans -> auth + requireAppAccess
+  //     (faqat `via: 'miniapp'` tokeni yoki admin)
+  //   - /uploads/* (videolar)         -> requireMediaAccess (cookie/token)
+  //   - /api/verify/status            -> brauzerda token faqat adminlarga
+  // Ya'ni bu ekranni chetlab o'tgan odam ham kontent va video olmaydi.
+  //
+  // Admin brauzerdan kirishi mumkin: "Administrator sifatida kirish" tugmasi
+  // bot orqali tasdiqlash oqimini ochadi, server esa admin ekanini
+  // tekshirgach token beradi.
+  const insideTelegram = isRunningInTelegram();
+  if (!insideTelegram && !isAdmin && !isTelegramGateBypassed) {
+    return (
+      <ErrorBoundary>
+        <TelegramOnlyGate
+          onAdminVerify={() => {
+            // Tasdiqlash oynasini ochamiz. Server admin bo'lmasa token
+            // bermaydi va tushunarli xabar qaytaradi.
+            setIsTelegramGateBypassed(true);
+            setIsPhoneModalOpen(true);
+          }}
+        />
+      </ErrorBoundary>
+    );
+  }
+
   if (!securityCheck.isAllowed) {
     const isDevice = securityCheck.banType === 'device';
     const isNotTelegram = securityCheck.banType === 'not_telegram';

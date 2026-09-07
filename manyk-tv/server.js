@@ -180,6 +180,109 @@ function auth(req, res, next) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  KIRISH SIYOSATI: ILOVA FAQAT TELEGRAM ICHIDA, BRAUZER — FAQAT ADMINLARGA
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// TALAB: "bot web app bo'lib ishlasin, saytga otib ketmasin; brauzerdan
+// kirishni bloklasin; brauzer faqat admin va admin tayinlagan odamlarga
+// ochiq bo'lsin".
+//
+// BUNI QANDAY ISHONCHLI QILISH MUMKIN:
+//
+// Telegram Mini App ichida ochilganda brauzerga `initData` beriladi — u bot
+// tokeni bilan HMAC-SHA256 imzolangan, ya'ni uni SOXTALASHTIRIB BO'LMAYDI.
+// Oddiy brauzerda esa `initData` YO'Q. Shuning uchun token BERILGAN JOYNI
+// tokenning o'zida belgilab qo'yamiz:
+//
+//     via = 'miniapp'  -> /api/auth/verify (initData HMAC tekshirilgan)
+//     via = 'bot'      -> /api/verify/status (bot orqali kontakt tasdiqlash)
+//
+// Keyin `requireAppAccess` middleware faqat quyidagilarni o'tkazadi:
+//     - Telegram Mini App ichidan kelgan har qanday foydalanuvchi
+//     - yoki ADMIN (qaysi yo'l bilan kirgan bo'lishidan qat'i nazar)
+//
+// MUHIM: frontenddagi "Telegramda ochingiz" ekrani — bu faqat KO'RINISH
+// (UX). Haqiqiy bloklash SHU YERDA, serverda bo'ladi: kontent ro'yxati va
+// video fayllari tokensiz berilmaydi. Aks holda brauzerdagi odam JS ni
+// chetlab o'tib, to'g'ridan-to'g'ri API'dan hammasini olib qo'yardi
+// (ilgari `GET /api/contents` UMUMAN himoyasiz edi).
+
+/** Token Telegram Mini App ichidan berilganmi? */
+function isFromMiniApp(user) {
+  return user?.via === 'miniapp';
+}
+
+function requireAppAccess(req, res, next) {
+  if (isFromMiniApp(req.user) || req.user?.isAdmin) return next();
+
+  return res.status(403).json({
+    ok: false,
+    error: 'browser_blocked',
+    message:
+      "MANYAK TV faqat Telegram ilovasi ichida ishlaydi. Iltimos, botni ochib " +
+      "«MANYAK TV ni ochish» tugmasini bosingiz.",
+  });
+}
+
+// ─── Media (video/rasm) uchun cookie ────────────────────────────────────────
+//
+// `<video src="/uploads/kino.mp4">` so'roviga brauzer `Authorization`
+// header'ini QO'SHA OLMAYDI — ya'ni video fayllarni oddiy JWT bilan
+// himoyalab bo'lmaydi. Shuning uchun token berilgan paytda qo'shimcha
+// httpOnly cookie o'rnatamiz; `<video>` va `<img>` so'rovlari cookie'ni
+// avtomatik yuboradi (same-origin).
+const MEDIA_COOKIE_NAME = 'manyak_media';
+
+function setMediaCookie(res, token) {
+  // 24 soat — JWT muddati bilan bir xil
+  const parts = [
+    `${MEDIA_COOKIE_NAME}=${token}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${24 * 60 * 60}`,
+  ];
+  if (IS_PROD) parts.push('Secure');
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    if (part.slice(0, idx).trim() === name) return part.slice(idx + 1).trim();
+  }
+  return null;
+}
+
+/**
+ * `/uploads` uchun himoya: cookie yoki `?t=` orqali kelgan tokenni tekshiradi.
+ *
+ * ESKI KOD: `app.use('/uploads', express.static(UPLOADS_DIR))` — HECH QANDAY
+ * himoya yo'q edi. Ya'ni video manzilini bilgan istalgan odam (yoki
+ * `GET /api/contents` dan manzillarni olgan odam) barcha kinolarni
+ * to'lovsiz va Telegramdan tashqarida yuklab olardi.
+ */
+function requireMediaAccess(req, res, next) {
+  const token = readCookie(req, MEDIA_COOKIE_NAME) || req.query.t;
+  if (!token) {
+    return res.status(401).type('text/plain').send('Ruxsat yo\'q: ilovani Telegram orqali ochingiz.');
+  }
+  try {
+    const claims = jwt.verify(String(token), JWT_SECRET);
+    if (!isFromMiniApp(claims) && !claims.isAdmin) {
+      return res.status(403).type('text/plain').send('Faqat Telegram ilovasi ichida ko\'rish mumkin.');
+    }
+    req.user = claims;
+    return next();
+  } catch {
+    return res.status(401).type('text/plain').send('Sessiya muddati tugagan.');
+  }
+}
+
 function adminOnly(req, res, next) {
   if (!req.user?.isAdmin) return res.status(403).json({ ok: false, error: 'Admin huquqi kerak' });
   next();
@@ -339,7 +442,16 @@ app.post('/api/auth/verify', (req, res) => {
       username: user.username || '',
     });
     const isAdmin = Admins.isAdmin(String(user.id));
-    const token = jwt.sign({ id: String(user.id), username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
+    // `via: 'miniapp'` — bu token Telegram Mini App ichidan, HMAC bilan
+    // tekshirilgan `initData` asosida berildi. Faqat shu belgiga ega
+    // tokenlar (yoki adminlar) kontentga kira oladi — qarang
+    // `requireAppAccess`.
+    const token = jwt.sign(
+      { id: String(user.id), username: user.username, isAdmin, via: 'miniapp' },
+      JWT_SECRET, { expiresIn: '24h' }
+    );
+    // Video/rasm fayllari uchun cookie (`<video>` header yubora olmaydi)
+    setMediaCookie(res, token);
 
     // ESKI KOD `username` ni FAQAT yangi foydalanuvchi yaratilganda yozardi;
     // mavjud foydalanuvchida esa `firstName`/`lastName` ni yangilab,
@@ -418,11 +530,15 @@ app.post('/api/users/:id/reset-hwid', auth, adminOnly, (req, res) => {
 //  CONTENTS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/contents', (req, res) => {
+// ESKI KOD: `app.get('/api/contents', (req, res) => ...)` — auth YO'Q edi.
+// Ya'ni istalgan odam brauzerdan (yoki `curl` bilan) butun katalogni,
+// jumladan har bir qismning video manzilini olib qo'yardi. Endi kontent
+// faqat Telegram Mini App ichidagi foydalanuvchiga yoki adminga beriladi.
+app.get('/api/contents', auth, requireAppAccess, (req, res) => {
   res.json({ ok: true, contents: Contents.getAll() });
 });
 
-app.get('/api/contents/:id', (req, res) => {
+app.get('/api/contents/:id', auth, requireAppAccess, (req, res) => {
   const item = Contents.getById(req.params.id);
   if (!item) return res.status(404).json({ ok: false, error: 'Topilmadi' });
   res.json({ ok: true, content: item });
@@ -487,7 +603,16 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // Yuklangan fayllarni ("/uploads/xxx.mp4" kabi) hammaga ochiq statik
 // manzil sifatida uzatamiz — kino/rasm shu manzil orqali istalgan
 // foydalanuvchi qurilmasida ochiladi.
-app.use('/uploads', express.static(UPLOADS_DIR));
+// ESKI KOD: `app.use('/uploads', express.static(UPLOADS_DIR));` — himoyasiz.
+// Video manzilini bilgan istalgan odam barcha kinolarni to'lovsiz va
+// Telegramdan tashqarida yuklab olardi. Endi cookie/token tekshiriladi.
+app.use('/uploads', requireMediaAccess, express.static(UPLOADS_DIR, {
+  // Faylni brauzer keshlashi mumkin, lekin faqat shu foydalanuvchi uchun
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  },
+}));
 
 // Adminlar uchun: poster rasm va video fayllar
 const ALLOWED_UPLOAD_EXT = new Set([
@@ -689,7 +814,7 @@ app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
 //  PLANS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/plans', (req, res) => res.json({ ok: true, plans: Plans.getAll() }));
+app.get('/api/plans', auth, requireAppAccess, (req, res) => res.json({ ok: true, plans: Plans.getAll() }));
 
 app.post('/api/plans', auth, adminOnly, (req, res) => {
   const plan = Plans.upsert(req.body);
@@ -904,7 +1029,29 @@ app.get('/api/verify/status', (req, res) => {
   Admins.ensureEnvAdmin(user.id, { name: user.firstName, username: user.username });
   const isAdmin = Admins.isAdmin(user.id);
 
-  const token = jwt.sign({ id: user.id, username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
+  // ═══ BRAUZERDAN KIRISH FAQAT ADMINLARGA ═══
+  // Bu oqim (bot orqali kontakt tasdiqlash) Telegram Mini App TASHQARISIDA,
+  // ya'ni oddiy brauzerda ishlatiladi. Talab bo'yicha brauzerdan kirish
+  // faqat adminlarga va admin tayinlagan odamlarga ochiq — shuning uchun
+  // oddiy foydalanuvchiga token BERMAYMIZ va uni Telegramga yo'naltiramiz.
+  // (Foydalanuvchi tasdiqlangan holatida qoladi — Mini App'ni ochsa
+  // hammasi ishlaydi.)
+  if (!isAdmin) {
+    VerificationCodes.markClaimed(row.code);
+    return res.status(403).json({
+      ok: false,
+      error: 'browser_blocked',
+      message:
+        "Hisobingiz tasdiqlandi! Ammo MANYAK TV faqat Telegram ilovasi ichida " +
+        "ishlaydi — botga qaytib «MANYAK TV ni ochish» tugmasini bosingiz.",
+    });
+  }
+
+  const token = jwt.sign(
+    { id: user.id, username: user.username, isAdmin, via: 'bot' },
+    JWT_SECRET, { expiresIn: '24h' }
+  );
+  setMediaCookie(res, token);
   VerificationCodes.markClaimed(row.code);
 
   res.json({ ok: true, status: 'verified', verified: true, token, user, isAdmin });
@@ -1072,6 +1219,23 @@ async function handleTelegramUpdate(update) {
     const from = String(update.callback_query.from?.id || '');
     const data = String(update.callback_query.data || '');
     const chat = update.callback_query.message?.chat?.id;
+
+    // ═══ ODDIY FOYDALANUVCHI TUGMALARI (admin tekshiruvidan OLDIN) ═══
+    // ESKI KOD darhol `if (!isBotAdmin(from)) return '❌ Ruxsat yo'q'` qilardi,
+    // ya'ni oddiy foydalanuvchi HAR QANDAY tugmani bosganda "Ruxsat yo'q"
+    // xabarini olardi. Endi avval hammaga ochiq tugmalar ishlanadi.
+    if (data.startsWith('vip:')) {
+      await tgAnswer(update.callback_query.id, '💎 VIP taklifi yuborildi');
+      await sendVipOffer(chat, data.slice('vip:'.length));
+      return;
+    }
+
+    if (data === 'newlist') {
+      await tgAnswer(update.callback_query.id, '🆕 Yangi kinolar');
+      await sendNewContentList(chat, from);
+      return;
+    }
+
     if (!isBotAdmin(from)) { await tgAnswer(update.callback_query.id, '❌ Ruxsat yo\'q'); return; }
     if (data.startsWith('approve:')) await processCmd(data.replace('approve:', ''), 'approved', from, chat, update.callback_query.id);
     else if (data.startsWith('reject:')) await processCmd(data.replace('reject:', ''), 'rejected', from, chat, update.callback_query.id);
@@ -1167,9 +1331,33 @@ async function handleTelegramUpdate(update) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  //  3.5) /yangi — YANGI QO'SHILGAN KINOLAR (HAMMAGA OCHIQ)
+  // ═══════════════════════════════════════════════════════════════════════
+  // Admin tekshiruvidan OLDIN turishi shart, aks holda oddiy foydalanuvchi
+  // pastdagi `if (!isBotAdmin(from))` blokiga tushib ketardi.
+  if (txt === '/yangi' || txt === '/new' || txt === '/kinolar') {
+    await sendNewContentList(chat, from);
+    return;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   //  4) ADMIN BUYRUQLARI
   // ═══════════════════════════════════════════════════════════════════════
   if (!isBotAdmin(from)) {
+    // ESKI KOD har qanday matnga "Tasdiqlash uchun /start buyrug'ini
+    // yuboring" deb javob berardi — ALLAQACHON TASDIQLAGAN foydalanuvchiga
+    // ham. Bu esa "yana tasdiqlash kerakmi?" degan chalkashlik tug'dirardi.
+    // Endi tasdiqlangan odamga tasdiqlash haqida gapirmaymiz, to'g'ridan-
+    // to'g'ri ilovaga kirish tugmasini beramiz.
+    if (Users.getById(from)?.isPhoneVerified) {
+      await tgSend(chat, [
+        '✅ Hisobingiz tasdiqlangan — qayta tasdiqlash kerak emas.',
+        '',
+        'Pastdagi tugma orqali ilovani oching.',
+      ].join('\n'), buildOpenAppKeyboard());
+      return;
+    }
+
     // Oddiy foydalanuvchiga tushunarli javob (ilgari mutlaq sukunat edi)
     await tgSend(chat, [
       "ℹ️ Bu bot MANYAK TV hisobingizni tasdiqlash uchun.",
@@ -1221,6 +1409,12 @@ async function handleContactVerification(message, from, chat) {
   const normalizedPhone = phone.startsWith('+') ? phone : `+${phone}`;
 
   // Profilni sinxronlab, keyin tasdiqlaymiz
+  // Bu foydalanuvchi ILGARI tasdiqlanganmi? (kontaktni ikkinchi marta
+  // yuborgan bo'lishi mumkin). Tasdiqlash o'zi idempotent, lekin quyida
+  // adminlarga TAKRORIY "yangi foydalanuvchi tasdiqlandi" xabari
+  // yuborilmasligi uchun buni oldindan bilishimiz kerak.
+  const wasAlreadyVerified = Boolean(Users.getById(from)?.isPhoneVerified);
+
   Users.syncTelegramProfile(message.from);
   const user = Users.verifyByContact(from, normalizedPhone);
   if (!user) {
@@ -1252,6 +1446,10 @@ async function handleContactVerification(message, from, chat) {
       ? '👑 Sizga <b>administrator</b> huquqi berildi.'
       : '🎬 Endi saytda barcha imkoniyatlardan foydalanishingiz mumkin.',
   ].filter(Boolean).join('\n'), buildOpenAppKeyboard());
+
+  // Takroriy kontaktda adminlarni bezovta qilmaymiz — foydalanuvchi
+  // allaqachon ro'yxatda bo'lgan, "yangi" emas.
+  if (wasAlreadyVerified) return;
 
   // Adminlarga xabar (faqat adminlarga — oddiy foydalanuvchilar ko'rmaydi)
   const adminReport = [
@@ -1304,8 +1502,13 @@ function isBotAdmin(userId) {
 function buildOpenAppKeyboard() {
   const appUrl = APP_URL;
   if (!appUrl) return null;
+  // IXCHAM: ikkala tugma BITTA qatorda (ilgari faqat 1 ta tugma bor edi va
+  // yangi kinolarni ko'rish uchun hech qanday yo'l yo'q edi).
   return {
-    inline_keyboard: [[{ text: '🎬 MANYAK TV ni ochish', web_app: { url: appUrl } }]],
+    inline_keyboard: [[
+      { text: '🎬 Ilovani ochish', web_app: { url: appUrl } },
+      { text: '🆕 Yangi kinolar', callback_data: 'newlist' },
+    ]],
   };
 }
 
@@ -1347,64 +1550,439 @@ async function tgAnswer(cbId, text) {
   return tgApi('answerCallbackQuery', { callback_query_id: cbId, text });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  BOT XABARNOMASI — TO'LIQ QAYTA YOZILDI
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ═══ ESKI KODDAGI 4 TA MUAMMO ═══
+//
+// 1) TUGMA TASHQI BRAUZERGA OLIB KETARDI:
+//        inline_keyboard: [[{ text: buttonText, url: buttonUrl }]]
+//    `url:` — Telegram bu havolani TASHQI brauzerda ochadi, ya'ni
+//    foydalanuvchi ilovadan chiqib ketardi. Endi `web_app:` ishlatiladi —
+//    ilova Telegram ICHIDA ochiladi.
+//
+// 2) YUKLANGAN POSTER YUBORILMASDI: `photoUrl.startsWith('http')` sharti
+//    bor edi, yuklangan rasmlar esa nisbiy manzilda (`/uploads/x.jpg`).
+//    Ya'ni admin panelidan yuklangan afisha xabarga QO'SHILMASDI.
+//    Bundan tashqari `/uploads` endi himoyalangan — Telegram serverlari
+//    unga cookie'siz kira olmaydi. Shuning uchun rasm URL orqali emas,
+//    FAYL sifatida (multipart) yuklanadi va Telegram qaytargan `file_id`
+//    keyingi yuborishlarda qayta ishlatiladi (tez va tejamkor).
+//
+// 3) QISM (EPISODE) TANLASH IMKONIYATI YO'Q EDI. Mini drama va seriallar
+//    uchun aniq qismni belgilab, havola to'g'ridan-to'g'ri o'sha qismni
+//    ochadigan qilish kerak edi.
+//
+// 4) HAMMAGA BIR XIL TUGMA KETARDI. Endi har bir foydalanuvchining
+//    huquqi tekshiriladi: VIP yoki sotib olgan bo'lsa — "Tomosha qilish",
+//    aks holda — "VIP obuna bo'lish" tugmasi.
+
+/** Telegramga rasmni FAYL sifatida yuklab, `file_id` qaytaradi. */
+async function uploadPhotoToTelegram(chatId, absPath, caption, replyMarkup) {
+  const buffer = fs.readFileSync(absPath);
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('caption', caption);
+  form.append('parse_mode', 'HTML');
+  if (replyMarkup) form.append('reply_markup', JSON.stringify(replyMarkup));
+  form.append('photo', new Blob([buffer]), path.basename(absPath));
+
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+    method: 'POST',
+    body: form,
+  });
+  const data = await res.json();
+  // Eng katta o'lchamdagi rasmning file_id si — keyingi yuborishlar uchun
+  const fileId = data?.result?.photo?.at(-1)?.file_id || null;
+  return { ok: Boolean(data?.ok), fileId, description: data?.description };
+}
+
+/** Poster manzilini diskdagi haqiqiy faylga aylantiradi (xavfsiz). */
+function resolvePosterFile(posterUrl) {
+  if (!posterUrl || typeof posterUrl !== 'string') return null;
+  if (!posterUrl.startsWith('/uploads/')) return null;
+
+  const name = path.basename(posterUrl.split('?')[0]);
+  const abs = path.join(UPLOADS_DIR, name);
+  // Papkadan chiqib ketishga yo'l qo'ymaymiz (path traversal himoyasi)
+  if (!abs.startsWith(UPLOADS_DIR)) return null;
+  return fs.existsSync(abs) ? abs : null;
+}
+
+/** Kontent turining o'qiladigan nomi. */
+function contentTypeLabel(type) {
+  const LABELS = {
+    movie: 'Kino',
+    series: 'Serial',
+    short_drama: 'Mini drama',
+    anime_series: 'Anime',
+  };
+  return LABELS[type] || 'Kino';
+}
+
+/**
+ * "🆕 Yangi qo'shilganlar" ro'yxati — botda tez topish uchun.
+ *
+ * Talab: foydalanuvchi yangi qo'shilgan kinolarni oson topa olsin.
+ * Ilgari bunday imkon UMUMAN yo'q edi — bot faqat tasdiqlash uchun ishlardi
+ * va yangi kino chiqqanini bilishning yagona yo'li admin xabarnoma
+ * yuborishini kutish edi.
+ *
+ * Tugmalar har bir kino uchun alohida `web_app` — bosilganda ilova
+ * Telegram ICHIDA to'g'ridan-to'g'ri shu kinoda ochiladi.
+ */
+async function sendNewContentList(chat, userId) {
+  const user = userId ? Users.getById(String(userId)) : null;
+
+  let items = [];
+  try {
+    items = Contents.getAll()
+      .slice()
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+      // Telegram'da sendPhoto sarlavhasi (caption) 1024 belgi bilan
+      // cheklangan — shuning uchun ro'yxatni qisqa saqlaymiz.
+      .slice(0, 6);
+  } catch (err) {
+    console.error('[Yangi] Kontent olinmadi:', err);
+  }
+
+  if (!items.length) {
+    await tgSend(chat, "ℹ️ Hozircha kontent qo'shilmagan. Tez orada yangiliklar bo'ladi!");
+    return;
+  }
+
+  const NEW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  const lines = ['🆕 <b>Yangi qo\'shilganlar</b>', ''];
+  const rows = [];
+
+  for (const c of items) {
+    const created = new Date(c.createdAt || 0).getTime();
+    const isNew = created > 0 && now - created <= NEW_WINDOW_MS;
+    const eps = c.episodes?.length ? ` · ${c.episodes.length} qism` : '';
+    const lock = hasContentAccess(user, c, null) ? '' : ' 🔒';
+
+    lines.push(`${isNew ? '🆕' : '•'} <b>${escapeTgHtml(c.title)}</b> — ${contentTypeLabel(c.type)}${eps}${lock}`);
+
+    const link = buildContentDeepLink(c, null);
+    if (link) {
+      // Tugma matni qisqa bo'lishi kerak (ixchamlik uchun ham)
+      const label = `${isNew ? '🆕 ' : ''}${c.title}`;
+      rows.push([{ text: label.length > 40 ? `${label.slice(0, 39)}…` : label, web_app: { url: link } }]);
+    }
+  }
+
+  const hasVip = Boolean(user?.isVip) &&
+    (!user.vipExpiresAt || new Date(user.vipExpiresAt).getTime() > Date.now());
+  if (!hasVip) {
+    lines.push('', '🔒 — VIP obuna bilan ochiladi');
+    // Kontent ko'rsatilmagan umumiy VIP taklifi (rasm bilan yuboriladi)
+    rows.push([{ text: '💎 VIP olish', callback_data: 'vip:' }]);
+  }
+
+  const markup = rows.length ? { inline_keyboard: rows } : null;
+  await sendPhotoWithFallback(chat, items[0], lines.join('\n'), markup);
+}
+
+/** 39000 -> "39 000" (o'qish osonroq bo'lishi uchun) */
+function formatMoney(n) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) return '0';
+  return Math.round(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+}
+
+/**
+ * Kontent AFISHASI bilan xabar yuboradi (banner bo'lsa banner, aks holda poster).
+ *
+ * ═══ NEGA KERAK ═══
+ * Talab: xabar "faqat matn bo'lib qolmasin", rasm bilan chiqsin. Lekin
+ * afisha uch xil holatda bo'lishi mumkin va har biri boshqacha ishlanadi:
+ *   1) `/uploads/...` — bizning diskimizdagi fayl. Buni URL sifatida
+ *      yuborish MUMKIN EMAS, chunki `/uploads` avtorizatsiya talab qiladi
+ *      va Telegram serverlarida bizning cookie'imiz yo'q. Shuning uchun
+ *      fayl sifatida (multipart) YUKLANADI.
+ *   2) tashqi `http(s)://...` rasm — Telegram o'zi yuklab oladi.
+ *   3) rasm umuman yo'q yoki yuborilmadi — oddiy matnga tushamiz.
+ *
+ * Eng muhimi 3-holat: rasm yuborilmasa ham xabar YO'QOLMAYDI.
+ */
+async function sendPhotoWithFallback(chatId, content, caption, markup) {
+  const imageUrl = content?.bannerUrl || content?.posterUrl || '';
+
+  const file = resolvePosterFile(imageUrl);
+  if (file) {
+    const up = await uploadPhotoToTelegram(chatId, file, caption, markup);
+    if (up.ok) return { ok: true, withPhoto: true };
+    console.warn(`[Photo] Fayl yuklanmadi (${chatId}): ${up.description}`);
+  }
+
+  if (typeof imageUrl === 'string' && imageUrl.startsWith('http')) {
+    const payload = { chat_id: chatId, photo: imageUrl, caption, parse_mode: 'HTML' };
+    if (markup) payload.reply_markup = markup;
+    const r = await tgApi('sendPhoto', payload);
+    if (r.ok) return { ok: true, withPhoto: true };
+    console.warn(`[Photo] URL bilan yuborilmadi (${chatId}): ${r.description}`);
+  }
+
+  const r = await tgSend(chatId, caption, markup);
+  return { ok: Boolean(r.ok), withPhoto: false };
+}
+
+/**
+ * "💎 VIP olish" tugmasi bosilganda ishlaydi.
+ *
+ * Talab: VIP taklifi RASM (banner/afisha) bilan yuborilsin, faqat matn
+ * bo'lib qolmasin. Shuning uchun tugma `web_app` emas, `callback_data` —
+ * `web_app` bosilganda bot javob xabari yubora olmaydi.
+ *
+ * Taklifning o'zidagi "Obuna bo'lish" tugmasi esa yana `web_app`, ya'ni
+ * to'lov sahifasi Telegram ICHIDA ochiladi va foydalanuvchi tashqi
+ * brauzerga olib chiqilmaydi.
+ */
+async function sendVipOffer(chat, contentId) {
+  const content = contentId ? Contents.getById(String(contentId)) : null;
+
+  // ═══ RASM MANBASI ═══
+  // Talab: VIP taklifi RASM bilan chiqsin, faqat matn bo'lib qolmasin.
+  // Kontent ko'rsatilgan bo'lsa — o'shaning afishasi. Ko'rsatilmagan
+  // bo'lsa (masalan `/yangi` ro'yxatidagi umumiy "VIP olish" tugmasi) —
+  // eng yangi kontentning afishasini ishlatamiz, aks holda taklif
+  // quruq matn bo'lib qolardi.
+  let bannerSource = content;
+  if (!bannerSource) {
+    try {
+      bannerSource = Contents.getAll()
+        .filter((c) => c.bannerUrl || c.posterUrl)
+        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())[0] || null;
+    } catch (err) {
+      console.error('[VIP taklifi] Banner uchun kontent olinmadi:', err);
+    }
+  }
+
+  let plans = [];
+  try {
+    plans = Plans.getAll()
+      .filter((p) => p.isActive !== false)
+      .sort((a, b) => (a.price || 0) - (b.price || 0));
+  } catch (err) {
+    console.error('[VIP taklifi] Tariflar olinmadi:', err);
+  }
+
+  const lines = ['💎 <b>VIP obuna</b>', ''];
+  if (content) {
+    lines.push(`🎬 <b>${escapeTgHtml(content.title)}</b> — bu kontent VIP obuna bilan ochiladi.`, '');
+  }
+
+  if (plans.length) {
+    lines.push('<b>Tariflar:</b>');
+    for (const p of plans) {
+      const badge = p.badge ? ` — ${escapeTgHtml(p.badge)}` : '';
+      lines.push(`• ${escapeTgHtml(p.name)}: <b>${formatMoney(p.price)}</b> so'm${badge}`);
+    }
+    lines.push('');
+  }
+
+  lines.push(
+    '✅ Barcha seriallar va mini dramalar',
+    '✅ Yangi qismlar birinchi bo\'lib',
+    '✅ Cheklovsiz tomosha',
+  );
+
+  const vipUrl = APP_URL ? `${APP_URL}/?vip=1` : null;
+  const markup = vipUrl
+    ? { inline_keyboard: [[{ text: '💎 Obuna bo\'lish', web_app: { url: vipUrl } }]] }
+    : null;
+
+  return sendPhotoWithFallback(chat, bannerSource, lines.join('\n'), markup);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  KONTENTGA KIRISH HUQUQI VA TUGMALAR — UMUMIY YORDAMCHILAR
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Bu mantiq ilgari `/api/broadcast` ichida YOPIQ funksiya (closure) edi,
+// shuning uchun uni boshqa joyda (masalan `/yangi` buyrug'ida yoki VIP
+// tugmasi bosilganda) qayta ishlatish MUMKIN EMAS edi — nusxa ko'chirish
+// kerak bo'lardi va ikki joyda mantiq bir-biridan uzilib ketardi.
+// Endi bitta manba: har joyda AYNAN bir xil huquq tekshiruvi ishlatiladi.
+
+/**
+ * Foydalanuvchining shu kontentga (yoki aniq qismga) huquqi bormi?
+ * MUHIM: bu tekshiruv faqat SERVERDA bajariladi — klient yuborgan
+ * "menda VIP bor" degan da'voga hech qachon ishonilmaydi.
+ */
+function hasContentAccess(user, content, episode) {
+  if (!user || !content) return false;
+
+  const hasVip = Boolean(user.isVip) &&
+    (!user.vipExpiresAt || new Date(user.vipExpiresAt).getTime() > Date.now());
+  const purchased = Array.isArray(user.purchasedContentIds) &&
+    user.purchasedContentIds.includes(content.id);
+  const unlockedEpisode = Boolean(episode) && Array.isArray(user.unlockedEpisodeIds) &&
+    user.unlockedEpisodeIds.includes(`${content.id}:${episode.id}`);
+  const isFreeItem = !content.isPremium && (!content.price || content.price === 0);
+  const isFreeEpisode = episode ? Boolean(episode.isFree) : false;
+
+  return hasVip || purchased || unlockedEpisode || isFreeItem || isFreeEpisode;
+}
+
+/**
+ * Ilova ICHIDA ochiladigan havola.
+ * Query parametrlari frontendda o'qiladi (App.tsx deep-link handleri) va
+ * to'g'ridan-to'g'ri shu kontent/qism ochiladi.
+ */
+function buildContentDeepLink(content, episode) {
+  if (!APP_URL || !content) return null;
+  const params = new URLSearchParams({ content: String(content.id) });
+  if (episode) params.set('ep', String(episode.id));
+  return `${APP_URL}/?${params.toString()}`;
+}
+
+/**
+ * Har bir foydalanuvchiga MOS tugmalar (ixcham — bitta qatorda).
+ *
+ *   huquqi bor    -> [ ▶️ Tomosha qilish ]
+ *   huquqi yo'q   -> [ 💎 VIP olish ] [ 👁 Ko'rish ]
+ *
+ * BARCHA ochuvchi tugmalar `web_app` turida — ya'ni ilova Telegram ICHIDA
+ * ochiladi va foydalanuvchi tashqi brauzerga OLIB CHIQILMAYDI.
+ *
+ * "VIP olish" esa ataylab `callback_data` — chunki u bosilganda bot
+ * javoban AFISHA RASMI bilan taklif yuborishi kerak (faqat matn emas).
+ * `web_app` tugmasi bosilganda bot hech qanday xabar yubora olmaydi,
+ * shuning uchun aynan callback ishlatilgan.
+ */
+function buildAccessMarkup(user, content, episode) {
+  const webAppUrl = buildContentDeepLink(content, episode);
+  if (!webAppUrl) return null;
+
+  if (hasContentAccess(user, content, episode)) {
+    return { inline_keyboard: [[{ text: '▶️ Tomosha qilish', web_app: { url: webAppUrl } }]] };
+  }
+
+  // Telegram `callback_data` uchun 64 BAYT cheklovi bor — oshib ketsa
+  // Telegram butun xabarni RAD ETADI. Shuning uchun qisqartiramiz.
+  const vipData = Buffer.from(`vip:${content.id}`).subarray(0, 64).toString();
+
+  return {
+    inline_keyboard: [[
+      { text: '💎 VIP olish', callback_data: vipData },
+      { text: '👁 Ko\'rish', web_app: { url: webAppUrl } },
+    ]],
+  };
+}
+
 app.post('/api/broadcast', auth, adminOnly, async (req, res) => {
-  const { text, photoUrl, buttonText, buttonUrl } = req.body;
-  if (!text) return res.status(400).json({ ok: false, error: 'Matn kerak' });
+  const { text, contentId, episodeId, attachPoster = true } = req.body || {};
+  if (!text || !String(text).trim()) return res.status(400).json({ ok: false, error: 'Matn kerak' });
   if (!BOT_TOKEN) return res.status(503).json({ ok: false, error: 'Bot token sozlanmagan' });
 
-  try {
-    const allUsers = Users.getAll();
-    let successCount = 0;
-    
-    // Yuborish uchun payload tayyorlash
-    const payloadTemplate = { parse_mode: 'HTML' };
-    if (buttonText && buttonUrl) {
-      payloadTemplate.reply_markup = {
-        inline_keyboard: [[{ text: buttonText, url: buttonUrl }]]
-      };
+  // ─── Kontent va qismni SERVERDAN olamiz (klientga ishonmaymiz) ───
+  let content = null;
+  let episode = null;
+  if (contentId) {
+    content = Contents.getById(String(contentId));
+    if (!content) return res.status(404).json({ ok: false, error: 'Kontent topilmadi' });
+
+    if (episodeId) {
+      episode = (content.episodes || []).find((e) => String(e.id) === String(episodeId)) || null;
+      if (!episode) return res.status(404).json({ ok: false, error: 'Qism topilmadi' });
     }
-    if (photoUrl && photoUrl.startsWith('http')) {
-      payloadTemplate.photo = photoUrl;
-      payloadTemplate.caption = text;
-    } else {
-      payloadTemplate.text = text;
-    }
-
-    const endpoint = photoUrl && photoUrl.startsWith('http') ? 'sendPhoto' : 'sendMessage';
-
-    // Asinxron yuborish (server qotmasligi uchun)
-    res.json({ ok: true, totalUsers: allUsers.length, message: "Xabarnoma yuborish boshlandi" });
-
-    // Orqa fonda yuborish
-    (async () => {
-      for (const user of allUsers) {
-        if (!user.id) continue;
-        try {
-          const payload = { ...payloadTemplate, chat_id: user.id };
-          const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if (response.ok) {
-            successCount++;
-          } else {
-            const errData = await response.json();
-            console.error(`[Broadcast API Error for user ${user.id}]:`, errData.description);
-          }
-          // API limit (30 req/sec) dan oshmaslik uchun kutish
-          await new Promise(resolve => setTimeout(resolve, 50));
-        } catch (e) {
-          console.error(`[Broadcast Network Error]:`, e.message);
-        }
-      }
-      AuditLogs.add({ adminId: req.user.id, action: 'BROADCAST', details: `${successCount} ta foydalanuvchiga yuborildi.` });
-    })();
-
-  } catch (err) {
-    console.error('[Broadcast]', err);
-    if (!res.headersSent) res.status(500).json({ ok: false, error: 'Xatolik yuz berdi' });
   }
+
+  // Tugmalar endi umumiy `buildAccessMarkup()` orqali yasaladi (yuqoriga
+  // qarang) — shu bilan `/yangi` buyrug'i va VIP taklifi bilan mantiq
+  // bir xil bo'lib qoladi.
+  const webAppUrl = buildContentDeepLink(content, episode);
+
+  // ─── Xabar matni ───
+  const parts = [String(text).trim()];
+  if (content) {
+    parts.push('');
+    parts.push(`🎬 <b>${escapeTgHtml(content.title)}</b>`);
+    if (episode) {
+      const epLabel = episode.title || `${episode.episodeNumber || ''}-qism`;
+      parts.push(`📺 ${escapeTgHtml(epLabel)}`);
+    }
+  }
+  const caption = parts.join('\n');
+
+  const posterFile = attachPoster && content ? resolvePosterFile(content.posterUrl) : null;
+  const posterHttpUrl =
+    attachPoster && content && typeof content.posterUrl === 'string' && content.posterUrl.startsWith('http')
+      ? content.posterUrl
+      : null;
+
+  const allUsers = Users.getAll().filter((u) => u.id && !u.isBanned);
+
+  res.json({
+    ok: true,
+    totalUsers: allUsers.length,
+    withPoster: Boolean(posterFile || posterHttpUrl),
+    opensInApp: Boolean(webAppUrl),
+    message: `Xabarnoma ${allUsers.length} ta foydalanuvchiga yuborilmoqda…`,
+  });
+
+  // ─── Orqa fonda yuborish ───
+  (async () => {
+    let sent = 0;
+    let failed = 0;
+    // Rasmni BIR MARTA yuklab, keyin `file_id` ni qayta ishlatamiz —
+    // aks holda har bir foydalanuvchi uchun fayl qaytadan yuklanardi.
+    let cachedFileId = null;
+
+    for (const user of allUsers) {
+      try {
+        const markup = buildAccessMarkup(user, content, episode);
+
+        if (posterFile && !cachedFileId) {
+          const up = await uploadPhotoToTelegram(user.id, posterFile, caption, markup);
+          if (up.ok) {
+            cachedFileId = up.fileId;
+            sent++;
+          } else {
+            failed++;
+            console.error(`[Broadcast] ${user.id}: ${up.description}`);
+          }
+        } else {
+          const photo = cachedFileId || posterHttpUrl;
+          const endpoint = photo ? 'sendPhoto' : 'sendMessage';
+          const payload = { chat_id: user.id, parse_mode: 'HTML' };
+          if (photo) {
+            payload.photo = photo;
+            payload.caption = caption;
+          } else {
+            payload.text = caption;
+            payload.disable_web_page_preview = true;
+          }
+          if (markup) payload.reply_markup = markup;
+
+          const r = await tgApi(endpoint, payload);
+          if (r.ok) sent++;
+          else {
+            failed++;
+            console.error(`[Broadcast] ${user.id}: ${r.description}`);
+          }
+        }
+      } catch (e) {
+        failed++;
+        console.error('[Broadcast]', e.message);
+      }
+      // Telegram limiti (~30 xabar/sek) dan oshmaslik uchun
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    console.log(`[Broadcast] Yuborildi: ${sent}, muvaffaqiyatsiz: ${failed}`);
+    AuditLogs.add({
+      adminId: req.user.id,
+      action: 'BROADCAST',
+      targetId: content?.id,
+      targetTitle: content?.title,
+      details: `${sent} ta yuborildi, ${failed} ta xato${episode ? ` (qism: ${episode.title || episode.episodeNumber})` : ''}`,
+    });
+  })();
 });
 
 app.post('/api/setup-webhook', auth, adminOnly, async (req, res) => {
@@ -1557,6 +2135,29 @@ app.post('/api/sync-receipt', auth, (req, res) => {
   }
 });
 
+// ─── Ommaviy (maxfiy bo'lmagan) konfiguratsiya ──────────────────────────────
+//
+// Kirish ekraniga bot manzilini ko'rsatish uchun kerak. Faqat bot USERNAME
+// beriladi — u Telegramda baribir ommaviy ma'lumot. Bot TOKENI, admin ID lari
+// va boshqa maxfiy qiymatlar bu yerda YO'Q.
+//
+// Bu endpoint auth talab qilmaydi: tashrifchi hali tizimga kirmagan bo'ladi
+// va aynan shu sababli unga botga qanday o'tishni ko'rsatish kerak.
+app.get('/api/public-config', (req, res) => {
+  let botUsername = '';
+  try {
+    botUsername = String(Settings.get().botUsername || process.env.BOT_USERNAME || '').replace('@', '');
+  } catch (err) {
+    console.error('[public-config]', err);
+  }
+  res.json({
+    ok: true,
+    botUsername: botUsername || null,
+    // Frontend shu belgi bo'yicha "Telegramda ochingiz" ekranini ko'rsatadi
+    telegramOnly: true,
+  });
+});
+
 // ─── Health ─────────────────────────────────────────────────────────────────
 // ESKI KOD: bu endpoint autentifikatsiyasiz `Stats.dashboard()` ni qaytarardi,
 // ya'ni istalgan odam foydalanuvchilar soni, VIP soni va UMUMIY DAROMADni
@@ -1686,6 +2287,42 @@ verifyCleanupTimer.unref?.();
 //    brauzerga chiqarardi va server botidan update'larni "o'g'irlardi".
 //    O'sha kod endi butunlay olib tashlandi (frontend commitiga qarang).
 //
+/**
+ * Botning pastdagi DOIMIY menyu tugmasini "ilovani ochish" ga o'zgartiradi.
+ *
+ * ═══ NEGA KERAK ═══
+ * Ilgari ilovaga kirish uchun yagona yo'l — bot yuborgan xabardagi inline
+ * tugma edi. Foydalanuvchi suhbatni tozalasa yoki xabar tarixda ko'milib
+ * ketsa, ilovaga qanday kirishni bilmasdi va yana `/start` yozishga
+ * majbur bo'lardi.
+ *
+ * `setChatMenuButton` (chat_id BERILMAGANDA) BARCHA foydalanuvchilar uchun
+ * standart menyu tugmasini o'rnatadi: xabar yozish maydonining chap
+ * tomonida doimiy "🎬 MANYAK TV" tugmasi paydo bo'ladi va u ilovani
+ * Telegram ICHIDA ochadi.
+ *
+ * MUHIM: buni ilgari faqat @BotFather orqali QO'LDA sozlash mumkin deb
+ * hisoblanardi. Bot API'da usul bor, shuning uchun server ishga tushganda
+ * avtomatik o'rnatiladi — qo'lda hech narsa qilish kerak emas.
+ */
+async function setupBotMenuButton() {
+  if (!BOT_TOKEN || !APP_URL) return;
+
+  const res = await tgApi('setChatMenuButton', {
+    menu_button: {
+      type: 'web_app',
+      text: '🎬 MANYAK TV',
+      web_app: { url: APP_URL },
+    },
+  });
+
+  if (res.ok) {
+    console.log(`[Bot] ✅ Doimiy menyu tugmasi o'rnatildi -> ${APP_URL}`);
+  } else {
+    console.warn(`[Bot] ⚠️  Menyu tugmasi o'rnatilmadi: ${res.description || 'noma\'lum xatolik'}`);
+  }
+}
+
 // Endi server ishga tushganda webhook AVTOMATIK ro'yxatdan o'tadi.
 async function setupBotWebhook() {
   if (!BOT_TOKEN) {
@@ -1721,6 +2358,24 @@ async function setupBotWebhook() {
   } catch (err) {
     console.error('[Bot] Username saqlanmadi:', err);
   }
+
+  // Buyruq menyusi — foydalanuvchi "/" bosganda ro'yxatdan ko'radi.
+  // Bu ham yangi kinolarni topishni osonlashtiradi: `/yangi` ko'rinib turadi.
+  const cmdRes = await tgApi('setMyCommands', {
+    commands: [
+      { command: 'start', description: 'Boshlash / ilovani ochish' },
+      { command: 'yangi', description: '🆕 Yangi qo\'shilgan kinolar' },
+    ],
+  });
+  if (!cmdRes.ok) {
+    console.warn(`[Bot] ⚠️  Buyruq menyusi o'rnatilmadi: ${cmdRes.description || 'noma\'lum xatolik'}`);
+  }
+
+  // DOIMIY "ILOVANI OCHISH" TUGMASI — pastdagi izohga qarang.
+  // Webhook tekshiruvidan OLDIN chaqiriladi, chunki quyida webhook
+  // allaqachon to'g'ri bo'lsa funksiya `return` qiladi va menyu tugmasi
+  // umuman o'rnatilmay qolardi.
+  await setupBotMenuButton();
 
   // Mavjud webhook allaqachon to'g'ri bo'lsa qayta o'rnatmaymiz
   const info = await tgApi('getWebhookInfo', {});

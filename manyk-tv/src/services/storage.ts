@@ -375,17 +375,45 @@ export async function deleteStoredContent(id: string): Promise<void> {
 // tortib olish. Bu — ilova ochilganda va admin/boshqa qurilmada kontent
 // o'zgarganda barcha foydalanuvchilarning ekranida bir xil ro'yxat
 // ko'rinishini ta'minlaydi (avval umuman chaqirilmagan edi).
-export function syncContentFromServer(): Promise<void> {
-  return fetch('/api/contents')
-    .then((res) => res.json())
-    .then((data) => {
-      if (data?.ok && Array.isArray(data.contents)) {
-        setItem(KEYS.CONTENT, data.contents);
-      }
-    })
-    .catch((err) => {
-      console.error('Kontentni serverdan olishda xatolik:', err);
-    });
+/**
+ * Serverdagi kontent ro'yxatini keshga tortib oladi.
+ *
+ * ═══ ENDI AUTENTIFIKATSIYA TALAB QILADI ═══
+ * ESKI KOD `fetch('/api/contents')` ni tokensiz yuborardi, chunki endpoint
+ * himoyasiz edi. Bu shuni bildirardi: istalgan odam brauzerdan (yoki `curl`
+ * bilan) butun katalogni va har bir qismning VIDEO MANZILINI olib qo'yardi.
+ *
+ * Endi kontent faqat Telegram Mini App ichidagi foydalanuvchiga yoki adminga
+ * beriladi (server: `requireAppAccess`), shuning uchun token yuborish shart.
+ */
+export async function syncContentFromServer(): Promise<void> {
+  const authHeaders = await getAuthHeaders();
+  if (!authHeaders.Authorization) {
+    // Token yo'q — Telegram tashqarisida yoki hali tasdiqlanmagan.
+    // Bu xato emas: kirish ekrani ko'rsatiladi.
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/contents', { headers: authHeaders });
+
+    if (res.status === 401) {
+      invalidateAuthToken();
+      return;
+    }
+    if (res.status === 403) {
+      // Brauzerdan kirish bloklangan (oddiy foydalanuvchi) — kesh o'zgarmaydi
+      return;
+    }
+
+    const data = await res.json();
+    if (data?.ok && Array.isArray(data.contents)) {
+      setItem(KEYS.CONTENT, data.contents);
+    }
+  } catch (err) {
+    // Oflayn holat — keshdagi ro'yxat bilan davom etamiz
+    console.warn('Kontentni serverdan olishda tarmoq xatosi:', err);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
