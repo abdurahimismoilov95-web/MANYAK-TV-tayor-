@@ -1,0 +1,1 @@
+sed -i 's/animate-in fade-in zoom-in-50 duration-300/animate-in fade-in zoom-in-75 slide-in-from-bottom-2 duration-300 animate-out fade-out zoom-out-90 duration-200/' src/components/VideoPlayerModal.tsx

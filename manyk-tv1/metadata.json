@@ -1,0 +1,6 @@
+{
+  "name": "MANYAK TV",
+  "description": "Telegram WebApp kino, serial va vertikal short dramalar platformasi, obuna va admin paneli bilan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
