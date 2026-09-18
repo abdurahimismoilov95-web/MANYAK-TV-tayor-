@@ -724,6 +724,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
       {/* 5. Public Links: Telegram Channel, Official Bot & Admin Contact */}
       <div className="space-y-2">
+        {console.log('[ProfileView] Public Links render - isAdmin:', isAdmin, 'botUsername:', botUsername)}
         {/* Rasmiy Telegram Bot */}
         <a
           href={`https://t.me/${botUsername}`}

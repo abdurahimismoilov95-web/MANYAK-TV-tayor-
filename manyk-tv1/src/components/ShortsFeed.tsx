@@ -21,7 +21,7 @@ import {
 } from '../services/storage';
 import { getAuthHeaders } from '../services/authToken';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 interface ShortsFeedProps {
   shortDramas: ContentItem[];
@@ -171,11 +171,25 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
 
   // ═══ KOMMENT QO'SHISH ═══
   const handleAddComment = async () => {
-    if (!commentInput.trim() || !currentDrama || !currentEpisode) return;
+    if (!commentInput.trim() || !currentDrama || !currentEpisode) {
+      console.log('[ShortsFeed] Komment bo\'sh yoki kontent topilmadi');
+      return;
+    }
+    
+    console.log('[ShortsFeed] Komment yuborilmoqda:', {
+      contentId: currentDrama.id,
+      episodeId: currentEpisode.id,
+      text: commentInput.trim()
+    });
     
     try {
       const authHeaders = await getAuthHeaders();
-      const response = await fetch(`${API_BASE_URL}/comments`, {
+      console.log('[ShortsFeed] Auth headers:', authHeaders);
+      
+      const url = `${API_BASE_URL}/comments`;
+      console.log('[ShortsFeed] URL:', url);
+      
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -188,15 +202,27 @@ export const ShortsFeed: React.FC<ShortsFeedProps> = ({
         }),
       });
       
+      console.log('[ShortsFeed] Response status:', response.status);
+      
       if (response.ok) {
         const data = await response.json();
+        console.log('[ShortsFeed] Komment muvaffaqiyatli qo\'shildi:', data);
         setComments([data.comment, ...comments]);
         setCommentInput('');
       } else {
-        console.error('[ShortsFeed] Komment qo\'shishda xato:', await response.text());
+        const errorText = await response.text();
+        console.error('[ShortsFeed] Server xatosi:', errorText);
+        alert(`Server xatosi (${response.status}): ${errorText.substring(0, 100)}`);
       }
     } catch (error) {
-      console.error('[ShortsFeed] Komment qo\'shishda xato:', error);
+      console.error('[ShortsFeed] Network xatosi:', error);
+      
+      // Batafsil xatolik
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        alert(`Server bilan bog'lanishda xatolik!\n\nURL: ${API_BASE_URL}/comments\n\nServer ishlab turishini tekshiring:\nhttp://localhost:3001/api/health`);
+      } else {
+        alert(`Komment yuborishda xatolik: ${error instanceof Error ? error.message : 'Noma\'lum xatolik'}`);
+      }
     }
   };
 
