@@ -310,8 +310,57 @@ const broadcastLimiter = rateLimit({
 // Umumiy API limiter'ni qo'llash
 app.use('/api/', apiLimiter);
 
-// Static files - uploads folder
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Static files - uploads folder (with video streaming support)
+app.use('/uploads', (req, res, next) => {
+  const filePath = path.join(__dirname, 'uploads', req.path);
+  
+  // Video fayl uchun range request support
+  if (req.path.match(/\.(mp4|webm|ogg)$/i) && req.headers.range) {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).send('File not found');
+      }
+      
+      const stat = fs.statSync(filePath);
+      const fileSize = stat.size;
+      
+      // Juda kichik fayl (< 10KB) bo'lsa - range request'siz yuborish
+      if (fileSize < 10240) {
+        console.warn(`[Uploads] Video juda kichik (${fileSize} bytes), range'siz yuborilmoqda: ${req.path}`);
+        delete req.headers.range;
+        return next();
+      }
+      
+      const range = req.headers.range;
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      
+      if (start >= fileSize || end >= fileSize) {
+        res.status(416).send('Range Not Satisfiable');
+        return;
+      }
+      
+      const chunksize = (end - start) + 1;
+      const file = fs.createReadStream(filePath, { start, end });
+      const head = {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': 'video/mp4',
+      };
+      
+      res.writeHead(206, head);
+      file.pipe(res);
+      return;
+    } catch (err) {
+      console.error('[Uploads] Range request error:', err.message);
+      // Xato bo'lsa oddiy static serve qilish
+    }
+  }
+  
+  next();
+}, express.static(path.join(__dirname, 'uploads')));
 
 // CORS
 // ESKI KOD: `origin.startsWith(o)` tekshiruvi edi — bu "http://localhost:5173.evil.com"
@@ -971,7 +1020,6 @@ app.post(
             .rotate() // EXIF orientation'ni auto-fix qiladi
             .withMetadata({
               exif: {}, // Barcha EXIF ma'lumotlarini olib tashlash
-              icc: false, // ICC color profile'ni saqlash (rasm sifati uchun)
             })
             .toBuffer();
           
