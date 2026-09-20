@@ -30,3 +30,8 @@ coverage/
 *.db-shm
 *.db-wal
 *.db.before-restore
+
+# Large archive files
+*.zip
+*.tar.gz
+*.rar
