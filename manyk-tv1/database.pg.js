@@ -1026,7 +1026,7 @@ export const AuditLogs = {
 //  VERIFICATION CODES (Telegram bot)
 // ══════════════════════════════════════════════════════════════════
 
-export const VerificationCodes = {
+const VerificationCodesBase = {
   async create(code) {
     await query(
       'INSERT INTO verification_codes (code, status, created_at) VALUES ($1, $2, NOW())',
@@ -1285,7 +1285,7 @@ export const Stats = {
 // ══════════════════════════════════════════════════════════════════
 
 const VerificationCodesExtended = {
-  ...VerificationCodes,
+  ...VerificationCodesBase,
   
   isExpired(row) {
     if (!row || !row.created_at) return true;
@@ -1295,7 +1295,7 @@ const VerificationCodesExtended = {
   },
 
   async markVerified(code, telegramId, phone) {
-    await VerificationCodes.updateStatus(code, 'verified', {
+    await VerificationCodesBase.updateStatus(code, 'verified', {
       telegramId: String(telegramId),
       phone,
       verifiedAt: new Date().toISOString(),
@@ -1303,14 +1303,14 @@ const VerificationCodesExtended = {
   },
 
   async markClaimed(code) {
-    await VerificationCodes.updateStatus(code, 'verified', {
+    await VerificationCodesBase.updateStatus(code, 'verified', {
       claimedAt: new Date().toISOString(),
     });
   },
 
   async attachChat(code, telegramId, chatId) {
     try {
-      await VerificationCodes.updateStatus(code, 'awaiting_contact', {
+      await VerificationCodesBase.updateStatus(code, 'awaiting_contact', {
         telegramId: String(telegramId),
         chatId: String(chatId),
       });
@@ -1330,7 +1330,7 @@ const VerificationCodesExtended = {
   },
 
   async cleanupExpired() {
-    await VerificationCodes.cleanup();
+    await VerificationCodesBase.cleanup();
   },
 };
 
