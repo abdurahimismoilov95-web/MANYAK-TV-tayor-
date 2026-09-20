@@ -1439,12 +1439,12 @@ app.delete('/api/admins/:id', auth, adminOnly, async (req, res) => {
 //  DAILY CHECK-IN & TOKENS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/checkin/:userId', auth, ownerOrAdmin('userId'), (req, res) => {
+app.get('/api/checkin/:userId', auth, ownerOrAdmin('userId'), async (req, res) => {
   const status = await DailyCheckIn.getStatus(req.params.userId);
   res.json({ ok: true, ...status });
 });
 
-app.post('/api/checkin/:userId/claim', auth, ownerOrAdmin('userId'), (req, res) => {
+app.post('/api/checkin/:userId/claim', auth, ownerOrAdmin('userId'), async (req, res) => {
   const result = await DailyCheckIn.claim(req.params.userId);
   res.json({ ok: true, ...result });
 });
@@ -1602,9 +1602,9 @@ app.get('/api/me/entitlements', auth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 app.get('/api/stats', auth, adminOnly, async (req, res) => {
-  const stats = await Stats.dashboard(),
-  sseConnections: sseConnectionCount(),;
-  res.json({ ok: true, stats });
+  const stats = await Stats.dashboard();
+  const sseConnections = sseConnectionCount();
+  res.json({ ok: true, stats, sseConnections });
 });
 
 // ESKI KOD: `Number(req.query.limit) || 100` — manfiy yoki juda katta qiymat
@@ -1966,7 +1966,7 @@ function escapeTgHtml(text) {
  * (ikki xil avtorizatsiya manbasi). Endi ikkisi ham `Admins.isAdmin`
  * orqali bitta joydan tekshiriladi.
  */
-function botAdminIds() {
+async function botAdminIds() {
   const ids = new Set([String(SUPER_ADMIN_ID)]);
   for (const id of String(process.env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean)) {
     ids.add(id);
@@ -2462,7 +2462,7 @@ app.get('/api/subscriptions/check-expired', auth, adminOnly, async (req, res) =>
   let expired = 0;
   const now = Date.now();
 
-  allUsers.forEach(u => {
+  for (const u of allUsers) {
     if (u.isVip && u.vipExpiresAt) {
       const expiryTime = new Date(u.vipExpiresAt).getTime();
       if (now > expiryTime) {
@@ -2470,7 +2470,7 @@ app.get('/api/subscriptions/check-expired', auth, adminOnly, async (req, res) =>
         expired++;
       }
     }
-  });
+  }
 
   res.json({ ok: true, expired });
 });
@@ -2690,7 +2690,7 @@ app.use((err, req, res, next) => {
 // /api/me/entitlements doim `isVip: true` qaytarib berardi.
 // Tugash faqat klient tomonida (localStorage'da) hisoblanardi — ya'ni
 // foydalanuvchi localStorage'ni tozalab, obunani "tiklab" olishi mumkin edi.
-function runExpirySweep() {
+async function runExpirySweep() {
   try {
     const result = await Users.expireSubscriptions();
     if (result?.changes > 0) {
