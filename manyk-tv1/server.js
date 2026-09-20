@@ -3014,47 +3014,8 @@ async function startServer() {
       console.log(`   Bot:        ${BOT_TOKEN ? '✅' : '⚠️  .env da TELEGRAM_BOT_TOKEN yozing'}`);
       console.log(`   Security:   HMAC-SHA256 + JWT + Rate Limit\n`);
       
-      // Avtomatik backup tizimi
-      // Har kuni soat 03:00 da backup yaratadi
-      const scheduleBackup = () => {
-        const now = new Date();
-        const next3AM = new Date(now);
-        next3AM.setHours(3, 0, 0, 0);
-        
-        if (next3AM <= now) {
-          next3AM.setDate(next3AM.getDate() + 1);
-        }
-        
-        const msUntil3AM = next3AM - now;
-        
-        setTimeout(() => {
-          console.log('[Backup] Kunlik backup boshlanmoqda...');
-          Backup.create();
-          
-          // Keyingi kun uchun qayta rejalashtirish
-          setInterval(() => {
-            console.log('[Backup] Kunlik backup boshlanmoqda...');
-            Backup.create();
-          }, 24 * 60 * 60 * 1000);
-        }, msUntil3AM);
-        
-        console.log(`[Backup] Keyingi backup: ${next3AM.toLocaleString('uz-UZ')}`);
-      };
-      
-      // Dastlabki backup (agar 7 kundan eski backup bo'lsa)
-      const backups = Backup.list();
-      const lastBackup = backups[0];
-      const shouldBackup = !lastBackup || 
-        (Date.now() - new Date(lastBackup.created).getTime() > 7 * 24 * 60 * 60 * 1000);
-      
-      if (shouldBackup) {
-        console.log('[Backup] Dastlabki backup yaratilmoqda...');
-        Backup.create();
-      } else {
-        console.log(`[Backup] Oxirgi backup: ${new Date(lastBackup.created).toLocaleString('uz-UZ')}`);
-      }
-      
-      scheduleBackup();
+      // PostgreSQL automatic backups are handled by Railway
+      console.log('[Backup] Railway handles PostgreSQL backups automatically');
     });
   } catch (err) {
     console.error('❌ Server startup failed:', err);
