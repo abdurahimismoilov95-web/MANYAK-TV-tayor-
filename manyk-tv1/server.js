@@ -35,9 +35,14 @@ import multer from 'multer';
 import {
   Users, Receipts, Contents, Plans, PromoCodes, WatchHistory,
   Favorites, Settings, Admins, AuditLogs, BannedDevices,
-  DailyCheckIn, TokenUnlock, Stats, VerificationCodes, Backup,
-  Comments, seedIfEmpty, SUPER_ADMIN_ID, db, DB_PATH
-} from './database.js';
+  Comments, initializeSchema, pool, query, inTransaction
+} from './database.pg.js';
+
+// Note: PostgreSQL version does not export these (they were SQLite specific):
+// - DailyCheckIn, TokenUnlock, Stats, VerificationCodes, Backup - need to be refactored or removed
+// - seedIfEmpty - need to implement if needed
+// - db, DB_PATH - SQLite specific, use pool/query instead
+const SUPER_ADMIN_ID = process.env.SUPER_ADMIN_ID || '891846690';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -197,11 +202,6 @@ if (!IS_PROD && (!process.env.JWT_SECRET || !process.env.WEBHOOK_SECRET)) {
   console.warn('⚠️  [DEV WARNING] JWT_SECRET va WEBHOOK_SECRET .env da yo\'q — standart (nomaxfiy) qiymat ishlatilmoqda.');
   console.warn('    Production deploy qilishdan oldin albatta o\'zgartiring!');
 }
-
-// ─── Seed initial data ────────────────────────────────────────────────────
-console.log('[Seed] Checking if database needs seeding...');
-seedIfEmpty();
-console.log('[Seed] ✅ Seed check completed');
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
@@ -2964,56 +2964,76 @@ app.get('/api/health', (req, res) => {
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────
-httpServer.listen(PORT, () => {
-  console.log(`\n🚀 MANYAK TV SQLite Backend v2.0`);
-  console.log(`   http://localhost:${PORT}`);
-  console.log(`   Health:     /api/health`);
-  console.log(`   Webhook:    /webhook`);
-  console.log(`   DB:         ${DB_PATH || 'data/manyktv.db'}`);
-  console.log(`   Bot:        ${BOT_TOKEN ? '✅' : '⚠️  .env da TELEGRAM_BOT_TOKEN yozing'}`);
-  console.log(`   Security:   HMAC-SHA256 + JWT + Rate Limit\n`);
-  
-  // Avtomatik backup tizimi
-  // Har kuni soat 03:00 da backup yaratadi
-  const scheduleBackup = () => {
-    const now = new Date();
-    const next3AM = new Date(now);
-    next3AM.setHours(3, 0, 0, 0);
+async function startServer() {
+  try {
+    // Initialize PostgreSQL schema
+    console.log('[PostgreSQL] Initializing database schema...');
+    await initializeSchema();
+    console.log('[PostgreSQL] ✅ Schema initialized');
     
-    if (next3AM <= now) {
-      next3AM.setDate(next3AM.getDate() + 1);
-    }
+    // Seed if empty
+    console.log('[Seed] Checking if database needs seeding...');
+    await seedIfEmpty();
+    console.log('[Seed] ✅ Seed check completed');
     
-    const msUntil3AM = next3AM - now;
-    
-    setTimeout(() => {
-      console.log('[Backup] Kunlik backup boshlanmoqda...');
-      Backup.create();
+    // Start HTTP server
+    httpServer.listen(PORT, () => {
+      console.log(`\n🚀 MANYAK TV PostgreSQL Backend v3.0`);
+      console.log(`   http://localhost:${PORT}`);
+      console.log(`   Health:     /api/health`);
+      console.log(`   Webhook:    /webhook`);
+      console.log(`   DB:         ${DB_PATH}`);
+      console.log(`   Bot:        ${BOT_TOKEN ? '✅' : '⚠️  .env da TELEGRAM_BOT_TOKEN yozing'}`);
+      console.log(`   Security:   HMAC-SHA256 + JWT + Rate Limit\n`);
       
-      // Keyingi kun uchun qayta rejalashtirish
-      setInterval(() => {
-        console.log('[Backup] Kunlik backup boshlanmoqda...');
+      // Avtomatik backup tizimi
+      // Har kuni soat 03:00 da backup yaratadi
+      const scheduleBackup = () => {
+        const now = new Date();
+        const next3AM = new Date(now);
+        next3AM.setHours(3, 0, 0, 0);
+        
+        if (next3AM <= now) {
+          next3AM.setDate(next3AM.getDate() + 1);
+        }
+        
+        const msUntil3AM = next3AM - now;
+        
+        setTimeout(() => {
+          console.log('[Backup] Kunlik backup boshlanmoqda...');
+          Backup.create();
+          
+          // Keyingi kun uchun qayta rejalashtirish
+          setInterval(() => {
+            console.log('[Backup] Kunlik backup boshlanmoqda...');
+            Backup.create();
+          }, 24 * 60 * 60 * 1000);
+        }, msUntil3AM);
+        
+        console.log(`[Backup] Keyingi backup: ${next3AM.toLocaleString('uz-UZ')}`);
+      };
+      
+      // Dastlabki backup (agar 7 kundan eski backup bo'lsa)
+      const backups = Backup.list();
+      const lastBackup = backups[0];
+      const shouldBackup = !lastBackup || 
+        (Date.now() - new Date(lastBackup.created).getTime() > 7 * 24 * 60 * 60 * 1000);
+      
+      if (shouldBackup) {
+        console.log('[Backup] Dastlabki backup yaratilmoqda...');
         Backup.create();
-      }, 24 * 60 * 60 * 1000);
-    }, msUntil3AM);
-    
-    console.log(`[Backup] Keyingi backup: ${next3AM.toLocaleString('uz-UZ')}`);
-  };
-  
-  // Dastlabki backup (agar 7 kundan eski backup bo'lsa)
-  const backups = Backup.list();
-  const lastBackup = backups[0];
-  const shouldBackup = !lastBackup || 
-    (Date.now() - new Date(lastBackup.created).getTime() > 7 * 24 * 60 * 60 * 1000);
-  
-  if (shouldBackup) {
-    console.log('[Backup] Dastlabki backup yaratilmoqda...');
-    Backup.create();
-  } else {
-    console.log(`[Backup] Oxirgi backup: ${new Date(lastBackup.created).toLocaleString('uz-UZ')}`);
+      } else {
+        console.log(`[Backup] Oxirgi backup: ${new Date(lastBackup.created).toLocaleString('uz-UZ')}`);
+      }
+      
+      scheduleBackup();
+    });
+  } catch (err) {
+    console.error('❌ Server startup failed:', err);
+    process.exit(1);
   }
-  
-  scheduleBackup();
-});
+}
+
+startServer();
 
 export default app;
