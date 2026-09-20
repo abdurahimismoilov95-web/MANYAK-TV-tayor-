@@ -35,7 +35,8 @@ import multer from 'multer';
 import {
   Users, Receipts, Contents, Plans, PromoCodes, WatchHistory,
   Favorites, Settings, Admins, AuditLogs, BannedDevices,
-  Comments, initializeSchema, pool, query, inTransaction
+  Comments, DailyCheckIn, Stats, VerificationCodes,
+  initializeSchema, pool, query, inTransaction
 } from './database.pg.js';
 
 // Note: PostgreSQL version does not export these (they were SQLite specific):
