@@ -2905,8 +2905,8 @@ function shutdown(signal, exitCode = 0) {
 
   httpServer.close(() => {
     try {
-      db.close();
-      console.log('[Shutdown] SQLite yopildi');
+      pool.end();
+      console.log('[Shutdown] PostgreSQL pool yopildi');
     } catch (err) {
       console.error('[Shutdown] DB yopishda xatolik:', err);
     }
@@ -3010,7 +3010,7 @@ async function startServer() {
       console.log(`   http://localhost:${PORT}`);
       console.log(`   Health:     /api/health`);
       console.log(`   Webhook:    /webhook`);
-      console.log(`   DB:         ${DB_PATH}`);
+      console.log(`   DB:         PostgreSQL (Railway)`);
       console.log(`   Bot:        ${BOT_TOKEN ? '✅' : '⚠️  .env da TELEGRAM_BOT_TOKEN yozing'}`);
       console.log(`   Security:   HMAC-SHA256 + JWT + Rate Limit\n`);
       
