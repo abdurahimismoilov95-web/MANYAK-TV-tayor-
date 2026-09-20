@@ -468,7 +468,7 @@ function broadcastToAll(payload) {
   sseBroadcast(payload);
 }
 
-app.get('/api/events', (req, res) => {
+app.get('/api/events', async (req, res) => {
   // JWT query parametrida (EventSource header qo'ya olmaydi)
   const token = req.query.token;
   if (!token) return res.status(401).json({ ok: false, error: 'token kerak' });
@@ -528,7 +528,7 @@ function sseConnectionCount() {
 //  AUTH ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.post('/api/auth/verify', authLimiter, (req, res) => {
+app.post('/api/auth/verify', authLimiter, async (req, res) => {
   const { initData } = req.body;
   if (!initData) return res.status(400).json({ ok: false, error: 'initData kerak' });
   if (!BOT_TOKEN) return res.status(503).json({ ok: false, error: 'Bot token sozlanmagan' });
@@ -550,11 +550,11 @@ app.post('/api/auth/verify', authLimiter, (req, res) => {
     // AVTOMATIK ADMIN: `.env` da (SUPER_ADMIN_ID yoki ADMIN_IDS) ko'rsatilgan
     // Telegram ID egasi ro'yxatdan o'tishi bilanoq admin bo'ladi va
     // `appointed_admins` jadvaliga ham yozib qo'yiladi.
-    Admins.ensureEnvAdmin(String(user.id), {
+    await Admins.ensureEnvAdmin(String(user.id), {
       name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || `Admin #${user.id}`,
       username: user.username || '',
     });
-    const isAdmin = Admins.isAdmin(String(user.id));
+    const isAdmin = await Admins.isAdmin(String(user.id));
     const token = jwt.sign({ id: String(user.id), username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
 
     // ESKI KOD `username` ni FAQAT yangi foydalanuvchi yaratilganda yozardi;
@@ -562,7 +562,7 @@ app.post('/api/auth/verify', authLimiter, (req, res) => {
     // `username` ni TEGMASDAN qoldirardi. Ya'ni foydalanuvchi Telegramda
     // username'ini o'zgartirsa, saytda ESKISI qolib ketardi.
     // `syncTelegramProfile` bu ishni bitta joyda va to'g'ri bajaradi.
-    const dbUser = Users.syncTelegramProfile(user);
+    const dbUser = await Users.syncTelegramProfile(user);
 
     res.json({ ok: true, token, user: dbUser, isAdmin });
   } catch (err) {
@@ -575,11 +575,12 @@ app.post('/api/auth/verify', authLimiter, (req, res) => {
 //  USERS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/users', auth, adminOnly, (req, res) => {
-  res.json({ ok: true, users: Users.getAll() });
+app.get('/api/users', auth, adminOnly, async (req, res) => {
+  const users = await Users.getAll();
+  res.json({ ok: true, users });
 });
 
-app.get('/api/users/:id', auth, (req, res) => {
+app.get('/api/users/:id', auth, async (req, res) => {
   // ESKI KOD: har qanday tizimga kirgan (login qilgan) foydalanuvchi boshqa
   // HAR QANDAY userning ma'lumotlarini (telefon raqami, VIP holati va h.k.)
   // faqat ID sini bilib ko'ra olardi. Endi faqat o'zining profilini yoki
@@ -587,46 +588,46 @@ app.get('/api/users/:id', auth, (req, res) => {
   if (req.user?.id !== req.params.id && !req.user?.isAdmin) {
     return res.status(403).json({ ok: false, error: 'Ruxsat yo\'q' });
   }
-  const user = Users.getById(req.params.id);
+  const user = await Users.getById(req.params.id);
   if (!user) return res.status(404).json({ ok: false, error: 'Topilmadi' });
   res.json({ ok: true, user });
 });
 
-app.put('/api/users/:id', auth, adminOnly, (req, res) => {
-  const user = Users.getById(req.params.id);
+app.put('/api/users/:id', auth, adminOnly, async (req, res) => {
+  const user = await Users.getById(req.params.id);
   if (!user) return res.status(404).json({ ok: false, error: 'Topilmadi' });
-  const updated = Users.upsert({ ...user, ...req.body, id: req.params.id });
+  const updated = await Users.upsert({ ...user, ...req.body, id: req.params.id });
   res.json({ ok: true, user: updated });
 });
 
-app.post('/api/users/:id/vip', auth, adminOnly, adminActionLimiter, (req, res) => {
+app.post('/api/users/:id/vip', auth, adminOnly, adminActionLimiter, async (req, res) => {
   const days = req.body.days || 30;
-  const user = Users.grantVip(req.params.id, days);
+  const user = await Users.grantVip(req.params.id, days);
   if (!user) return res.status(404).json({ ok: false, error: 'Topilmadi' });
-  AuditLogs.add({ adminId: req.user.id, adminName: req.user.username, action: 'GRANT_VIP', targetId: req.params.id, details: `${days} kun VIP berildi` });
+  await AuditLogs.add({ adminId: req.user.id, adminName: req.user.username, action: 'GRANT_VIP', targetId: req.params.id, details: `${days} kun VIP berildi` });
   res.json({ ok: true, user });
 });
 
-app.delete('/api/users/:id/vip', auth, adminOnly, adminActionLimiter, (req, res) => {
-  Users.revokeVip(req.params.id);
-  AuditLogs.add({ adminId: req.user.id, action: 'REVOKE_VIP', targetId: req.params.id });
+app.delete('/api/users/:id/vip', auth, adminOnly, adminActionLimiter, async (req, res) => {
+  await Users.revokeVip(req.params.id);
+  await AuditLogs.add({ adminId: req.user.id, action: 'REVOKE_VIP', targetId: req.params.id });
   res.json({ ok: true });
 });
 
-app.post('/api/users/:id/ban', auth, adminOnly, adminActionLimiter, (req, res) => {
-  Users.ban(req.params.id, req.body.reason);
-  AuditLogs.add({ adminId: req.user.id, action: 'BAN_USER', targetId: req.params.id, details: req.body.reason });
+app.post('/api/users/:id/ban', auth, adminOnly, adminActionLimiter, async (req, res) => {
+  await Users.ban(req.params.id, req.body.reason);
+  await AuditLogs.add({ adminId: req.user.id, action: 'BAN_USER', targetId: req.params.id, details: req.body.reason });
   res.json({ ok: true });
 });
 
-app.delete('/api/users/:id/ban', auth, adminOnly, adminActionLimiter, (req, res) => {
-  Users.unban(req.params.id);
-  AuditLogs.add({ adminId: req.user.id, action: 'UNBAN_USER', targetId: req.params.id });
+app.delete('/api/users/:id/ban', auth, adminOnly, adminActionLimiter, async (req, res) => {
+  await Users.unban(req.params.id);
+  await AuditLogs.add({ adminId: req.user.id, action: 'UNBAN_USER', targetId: req.params.id });
   res.json({ ok: true });
 });
 
-app.post('/api/users/:id/reset-hwid', auth, adminOnly, (req, res) => {
-  Users.resetHwid(req.params.id);
+app.post('/api/users/:id/reset-hwid', auth, adminOnly, async (req, res) => {
+  await Users.resetHwid(req.params.id);
   res.json({ ok: true });
 });
 
@@ -634,19 +635,19 @@ app.post('/api/users/:id/reset-hwid', auth, adminOnly, (req, res) => {
 //  CONTENTS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/contents', (req, res) => {
-  res.json({ ok: true, contents: Contents.getAll() });
+app.get('/api/contents', async (req, res) => {
+  res.json({ ok: true, contents: await Contents.getAll() });
 });
 
-app.get('/api/contents/:id', (req, res) => {
-  const item = Contents.getById(req.params.id);
+app.get('/api/contents/:id', async (req, res) => {
+  const item = await Contents.getById(req.params.id);
   if (!item) return res.status(404).json({ ok: false, error: 'Topilmadi' });
   res.json({ ok: true, content: item });
 });
 
-app.post('/api/contents', auth, adminOnly, adminActionLimiter, (req, res) => {
-  const content = Contents.upsert(req.body);
-  AuditLogs.add({ adminId: req.user.id, action: 'ADD_CONTENT', targetId: content.id, targetTitle: content.title });
+app.post('/api/contents', auth, adminOnly, adminActionLimiter, async (req, res) => {
+  const content = await Contents.upsert(req.body);
+  await AuditLogs.add({ adminId: req.user.id, action: 'ADD_CONTENT', targetId: content.id, targetTitle: content.title });
   // ESKI KOD: bu yerda broadcast yo'q edi — shuning uchun admin kontent
   // qo'shganda boshqa foydalanuvchilarning ochiq turgan sahifasi buni
   // ilova qayta ochilmaguncha bilmasdi. Endi SSE orqali barcha ulangan
@@ -657,16 +658,16 @@ app.post('/api/contents', auth, adminOnly, adminActionLimiter, (req, res) => {
   res.json({ ok: true, content });
 });
 
-app.put('/api/contents/:id', auth, adminOnly, adminActionLimiter, (req, res) => {
-  const content = Contents.upsert({ ...req.body, id: req.params.id });
-  AuditLogs.add({ adminId: req.user.id, action: 'UPDATE_CONTENT', targetId: content.id, targetTitle: content.title });
+app.put('/api/contents/:id', auth, adminOnly, adminActionLimiter, async (req, res) => {
+  const content = await Contents.upsert({ ...req.body, id: req.params.id });
+  await AuditLogs.add({ adminId: req.user.id, action: 'UPDATE_CONTENT', targetId: content.id, targetTitle: content.title });
   broadcastToAll({ type: 'content_updated', action: 'update', contentId: content.id });
   res.json({ ok: true, content });
 });
 
-app.delete('/api/contents/:id', auth, adminOnly, adminActionLimiter, (req, res) => {
-  Contents.delete(req.params.id);
-  AuditLogs.add({ adminId: req.user.id, action: 'DELETE_CONTENT', targetId: req.params.id });
+app.delete('/api/contents/:id', auth, adminOnly, adminActionLimiter, async (req, res) => {
+  await Contents.delete(req.params.id);
+  await AuditLogs.add({ adminId: req.user.id, action: 'DELETE_CONTENT', targetId: req.params.id });
   broadcastToAll({ type: 'content_updated', action: 'delete', contentId: req.params.id });
   res.json({ ok: true });
 });
@@ -1032,7 +1033,7 @@ app.post(
       }
       
       fs.writeFileSync(filepath, finalBuffer);
-      AuditLogs.add({
+      await AuditLogs.add({
         adminId: req.user.id,
         action: 'UPLOAD_FILE',
         targetId: filename,
@@ -1050,20 +1051,20 @@ app.post(
 //  RECEIPTS API (To'lov cheklari)
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/receipts', auth, adminOnly, (req, res) => {
+app.get('/api/receipts', auth, adminOnly, async (req, res) => {
   const status = req.query.status;
-  const receipts = status ? Receipts.getByStatus(status) : Receipts.getAll();
+  const receipts = status ? await Receipts.getByStatus(status) : await Receipts.getAll();
   res.json({ ok: true, receipts });
 });
 
 // Receipt review (approve/reject) - Admin only
-app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
+app.put('/api/receipts/:id/review', auth, adminOnly, async (req, res) => {
   const { decision } = req.body;
   if (decision !== 'approved' && decision !== 'rejected') {
     return res.status(400).json({ ok: false, error: 'decision majburiy: approved yoki rejected' });
   }
 
-  const result = Receipts.review(req.params.id, req.user.id, decision);
+  const result = await Receipts.review(req.params.id, req.user.id, decision);
   
   if (!result.receipt) {
     return res.status(404).json({ ok: false, error: 'Chek topilmadi' });
@@ -1074,7 +1075,7 @@ app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
   }
 
   // Audit log
-  AuditLogs.add({
+  await AuditLogs.add({
     adminId: req.user.id,
     action: decision === 'approved' ? 'APPROVE_RECEIPT' : 'REJECT_RECEIPT',
     targetId: req.params.id,
@@ -1102,7 +1103,7 @@ app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
 // tekshiriladi (aks holda node:sqlite NOT NULL bind xatosi 500 qaytarardi).
 const RECEIPT_TYPES = ['vip_subscription', 'single_content'];
 
-app.post('/api/receipts', auth, receiptLimiter, (req, res) => {
+app.post('/api/receipts', auth, receiptLimiter, async (req, res) => {
   const body = req.body || {};
 
   // Foydalanuvchi boshqa odam nomidan chek yubora olmaydi
@@ -1120,7 +1121,7 @@ app.post('/api/receipts', auth, receiptLimiter, (req, res) => {
     return res.status(400).json({ ok: false, error: 'amount musbat son bo\'lishi kerak' });
   }
 
-  const receipt = Receipts.submit({ ...body, userId, amount });
+  const receipt = await Receipts.submit({ ...body, userId, amount });
 
   // Adminlarga SSE orqali xabar berish.
   // `client.write` uzilgan socketga yozilsa xato tashlaydi — ilgari bu
@@ -1131,7 +1132,7 @@ app.post('/api/receipts', auth, receiptLimiter, (req, res) => {
   // Telegram botga xabar yuborish (adminlarga)
   (async () => {
     try {
-      const user = Users.getById(userId);
+      const user = await Users.getById(userId);
       const userName = user ? `${user.firstName} ${user.lastName || ''}`.trim() : body.userName || `User #${userId}`;
       const userPhone = user?.phone || body.userPhone || 'N/A';
       
@@ -1201,11 +1202,11 @@ app.post('/api/receipts', auth, receiptLimiter, (req, res) => {
   res.json({ ok: true, receipt });
 });
 
-app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
+app.put('/api/receipts/:id/review', auth, adminOnly, async (req, res) => {
   const { decision } = req.body; // 'approved' | 'rejected'
   if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ ok: false, error: 'decision: approved/rejected' });
 
-  const result = Receipts.review(req.params.id, req.user.id, decision);
+  const result = await Receipts.review(req.params.id, req.user.id, decision);
   if (!result.receipt) return res.status(404).json({ ok: false, error: 'Chek topilmadi' });
 
   // Idempotentlik: chek allaqachon ko'rilgan bo'lsa qayta VIP berilmaydi.
@@ -1219,7 +1220,7 @@ app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
     });
   }
 
-  AuditLogs.add({ adminId: req.user.id, action: decision === 'approved' ? 'APPROVE_RECEIPT' : 'REJECT_RECEIPT', targetId: req.params.id, details: `${result.receipt.amount} so'm` });
+  await AuditLogs.add({ adminId: req.user.id, action: decision === 'approved' ? 'APPROVE_RECEIPT' : 'REJECT_RECEIPT', targetId: req.params.id, details: `${result.receipt.amount} so'm` });
 
   // MAXFIYLIK: qaror faqat chek EGASIGA yuboriladi (ilgari hammaga ketardi).
   sendToUser(result.receipt.user_id, {
@@ -1238,20 +1239,23 @@ app.put('/api/receipts/:id/review', auth, adminOnly, (req, res) => {
 //  PLANS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/plans', (req, res) => res.json({ ok: true, plans: Plans.getAll() }));
+app.get('/api/plans', async (req, res) => {
+  const plans = await Plans.getAll();
+  res.json({ ok: true, plans });
+});
 
-app.post('/api/plans', auth, adminOnly, (req, res) => {
-  const plan = Plans.upsert(req.body);
+app.post('/api/plans', auth, adminOnly, async (req, res) => {
+  const plan = await Plans.upsert(req.body);
   res.json({ ok: true, plan });
 });
 
-app.put('/api/plans/:id', auth, adminOnly, (req, res) => {
-  const plan = Plans.upsert({ ...req.body, id: req.params.id });
+app.put('/api/plans/:id', auth, adminOnly, async (req, res) => {
+  const plan = await Plans.upsert({ ...req.body, id: req.params.id });
   res.json({ ok: true, plan });
 });
 
-app.delete('/api/plans/:id', auth, adminOnly, (req, res) => {
-  Plans.delete(req.params.id);
+app.delete('/api/plans/:id', auth, adminOnly, async (req, res) => {
+  await Plans.delete(req.params.id);
   res.json({ ok: true });
 });
 
@@ -1264,28 +1268,31 @@ app.delete('/api/plans/:id', auth, adminOnly, (req, res) => {
 // bildiradi: istalgan odam tsiklda so'rov yuborib, promokodning butun
 // limitini bekorga tugatib qo'yishi mumkin edi.
 // Endi: auth majburiy, va `validate` faqat O'QIYDI — hisob esa haqiqiy xarid
-// paytida `PromoCodes.consume()` bilan oshiriladi.
-app.post('/api/promo/validate', auth, (req, res) => {
-  const result = PromoCodes.validate(req.body?.code || '');
+// paytida `await PromoCodes.consume()` bilan oshiriladi.
+app.post('/api/promo/validate', auth, async (req, res) => {
+  const result = await PromoCodes.validate(req.body?.code || '');
   res.json({ ok: true, ...result });
 });
 
-app.get('/api/promo', auth, adminOnly, (req, res) => res.json({ ok: true, promoCodes: PromoCodes.getAll() }));
+app.get('/api/promo', auth, adminOnly, async (req, res) => {
+  const promoCodes = await PromoCodes.getAll();
+  res.json({ ok: true, promoCodes });
+});
 
-app.post('/api/promo', auth, adminOnly, (req, res) => {
-  PromoCodes.create(req.body);
+app.post('/api/promo', auth, adminOnly, async (req, res) => {
+  await PromoCodes.create(req.body);
   res.json({ ok: true });
 });
 
-app.delete('/api/promo-codes/:id', auth, adminOnly, (req, res) => {
+app.delete('/api/promo-codes/:id', auth, adminOnly, async (req, res) => {
   // id yoki code bo'lishi mumkin - ikkalasini ham qo'llab-quvvatlaymiz
-  PromoCodes.delete(req.params.id);
+  await PromoCodes.delete(req.params.id);
   res.json({ ok: true });
 });
 
-app.delete('/api/promo/:code', auth, adminOnly, (req, res) => {
+app.delete('/api/promo/:code', auth, adminOnly, async (req, res) => {
   // Legacy endpoint - backward compatibility
-  PromoCodes.delete(req.params.code);
+  await PromoCodes.delete(req.params.code);
   res.json({ ok: true });
 });
 
@@ -1308,13 +1315,27 @@ function ownerOrAdmin(userIdParam) {
   };
 }
 
-app.get('/api/history/:userId', auth, ownerOrAdmin('userId'), (req, res) => res.json({ ok: true, history: WatchHistory.getByUser(req.params.userId) }));
-app.post('/api/history', auth, ownerOrAdmin('userId'), (req, res) => { WatchHistory.add(req.body); res.json({ ok: true }); });
-app.delete('/api/history/:userId', auth, ownerOrAdmin('userId'), (req, res) => { WatchHistory.clear(req.params.userId); res.json({ ok: true }); });
+app.get('/api/history/:userId', auth, ownerOrAdmin('userId'), async (req, res) => {
+  const history = await WatchHistory.getByUser(req.params.userId);
+  res.json({ ok: true, history });
+});
 
-app.get('/api/favorites/:userId', auth, ownerOrAdmin('userId'), (req, res) => res.json({ ok: true, favorites: Favorites.getByUser(req.params.userId) }));
-app.post('/api/favorites', auth, ownerOrAdmin('userId'), (req, res) => {
-  const added = Favorites.toggle(req.body.userId, req.body.contentId);
+app.post('/api/history', auth, ownerOrAdmin('userId'), async (req, res) => {
+  await WatchHistory.add(req.body);
+  res.json({ ok: true });
+});
+
+app.delete('/api/history/:userId', auth, ownerOrAdmin('userId'), async (req, res) => {
+  await WatchHistory.clear(req.params.userId);
+  res.json({ ok: true });
+});
+
+app.get('/api/favorites/:userId', auth, ownerOrAdmin('userId'), async (req, res) => {
+  const favorites = await Favorites.getByUser(req.params.userId);
+  res.json({ ok: true, favorites });
+});
+app.post('/api/favorites', auth, ownerOrAdmin('userId'), async (req, res) => {
+  const added = await Favorites.toggle(req.body.userId, req.body.contentId);
   res.json({ ok: true, added });
 });
 
@@ -1323,15 +1344,15 @@ app.post('/api/favorites', auth, ownerOrAdmin('userId'), (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Kommentlarni olish (public - hamma ko'ra oladi)
-app.get('/api/comments/:contentId', (req, res) => {
+app.get('/api/comments/:contentId', async (req, res) => {
   const { contentId } = req.params;
   const { episodeId } = req.query;
-  const comments = Comments.getByContent(contentId, episodeId || null);
+  const comments = await Comments.getByContent(contentId, episodeId || null);
   res.json({ ok: true, comments });
 });
 
 // Komment qo'shish (faqat authenticated foydalanuvchilar)
-app.post('/api/comments', auth, (req, res) => {
+app.post('/api/comments', auth, async (req, res) => {
   const { contentId, episodeId, text } = req.body;
   
   if (!contentId || !text || text.trim().length === 0) {
@@ -1342,12 +1363,12 @@ app.post('/api/comments', auth, (req, res) => {
     return res.status(400).json({ ok: false, error: 'Komment 500 belgidan oshmasligi kerak' });
   }
   
-  const user = Users.getById(req.user.id);
+  const user = await Users.getById(req.user.id);
   if (!user) {
     return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
   }
   
-  const comment = Comments.add({
+  const comment = await Comments.add({
     contentId,
     episodeId: episodeId || null,
     userId: user.id,
@@ -1359,11 +1380,11 @@ app.post('/api/comments', auth, (req, res) => {
 });
 
 // Kommentni o'chirish (faqat o'zi yoki admin)
-app.delete('/api/comments/:id', auth, (req, res) => {
+app.delete('/api/comments/:id', auth, async (req, res) => {
   const { id } = req.params;
   
   // Kommentni topish
-  const allComments = Comments.getByContent('dummy'); // Bu inefficient, lekin qisqa yo'l
+  const allComments = await Comments.getByContent('dummy'); // Bu inefficient, lekin qisqa yo'l
   const comment = allComments.find(c => c.id === id);
   
   if (!comment) {
@@ -1375,7 +1396,7 @@ app.delete('/api/comments/:id', auth, (req, res) => {
     return res.status(403).json({ ok: false, error: 'Ruxsat yo\'q' });
   }
   
-  Comments.delete(id);
+  await Comments.delete(id);
   res.json({ ok: true });
 });
 
@@ -1383,10 +1404,13 @@ app.delete('/api/comments/:id', auth, (req, res) => {
 //  SETTINGS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/settings', auth, adminOnly, (req, res) => res.json({ ok: true, settings: Settings.get() }));
-app.put('/api/settings', auth, adminOnly, (req, res) => {
-  const settings = Settings.update(req.body);
-  AuditLogs.add({ adminId: req.user.id, action: 'UPDATE_SETTINGS' });
+app.get('/api/settings', auth, adminOnly, async (req, res) => {
+  const settings = await Settings.get();
+  res.json({ ok: true, settings });
+});
+app.put('/api/settings', auth, adminOnly, async (req, res) => {
+  const settings = await Settings.update(req.body);
+  await AuditLogs.add({ adminId: req.user.id, action: 'UPDATE_SETTINGS' });
   res.json({ ok: true, settings });
 });
 
@@ -1394,16 +1418,19 @@ app.put('/api/settings', auth, adminOnly, (req, res) => {
 //  ADMINS API
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/admins', auth, adminOnly, (req, res) => res.json({ ok: true, admins: Admins.getAll() }));
-app.post('/api/admins', auth, adminOnly, (req, res) => {
+app.get('/api/admins', auth, adminOnly, async (req, res) => {
+  const admins = await Admins.getAll();
+  res.json({ ok: true, admins });
+});
+app.post('/api/admins', auth, adminOnly, async (req, res) => {
   if (!Admins.isSuperAdmin(req.user.id)) return res.status(403).json({ ok: false, error: 'Faqat Bosh Admin' });
-  Admins.upsert(req.body);
-  AuditLogs.add({ adminId: req.user.id, action: 'APPOINT_ADMIN', targetId: req.body.id, targetTitle: req.body.name });
+  await Admins.upsert(req.body);
+  await AuditLogs.add({ adminId: req.user.id, action: 'APPOINT_ADMIN', targetId: req.body.id, targetTitle: req.body.name });
   res.json({ ok: true });
 });
-app.delete('/api/admins/:id', auth, adminOnly, (req, res) => {
+app.delete('/api/admins/:id', auth, adminOnly, async (req, res) => {
   if (!Admins.isSuperAdmin(req.user.id)) return res.status(403).json({ ok: false, error: 'Faqat Bosh Admin' });
-  const ok = Admins.remove(req.params.id);
+  const ok = await Admins.remove(req.params.id);
   if (!ok) return res.status(400).json({ ok: false, error: 'Bosh Admin o\'chirib bo\'lmaydi' });
   res.json({ ok: true });
 });
@@ -1413,12 +1440,12 @@ app.delete('/api/admins/:id', auth, adminOnly, (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 app.get('/api/checkin/:userId', auth, ownerOrAdmin('userId'), (req, res) => {
-  const status = DailyCheckIn.getStatus(req.params.userId);
+  const status = await DailyCheckIn.getStatus(req.params.userId);
   res.json({ ok: true, ...status });
 });
 
 app.post('/api/checkin/:userId/claim', auth, ownerOrAdmin('userId'), (req, res) => {
-  const result = DailyCheckIn.claim(req.params.userId);
+  const result = await DailyCheckIn.claim(req.params.userId);
   res.json({ ok: true, ...result });
 });
 
@@ -1460,18 +1487,18 @@ function generateVerifyCode(length = 10) {
 // tomonida kontakt yuborilgandan keyin ishlaydi.
 const verifyStartLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
 
-app.post('/api/verify/start', verifyStartLimiter, (req, res) => {
+app.post('/api/verify/start', verifyStartLimiter, async (req, res) => {
   if (!BOT_TOKEN) {
     return res.status(503).json({ ok: false, error: 'Bot sozlanmagan. Administrator bilan bog\'laning.' });
   }
 
-  const botUsername = Settings.get().botUsername || process.env.BOT_USERNAME || '';
+  const botUsername = await Settings.get().botUsername || process.env.BOT_USERNAME || '';
   if (!botUsername) {
     return res.status(503).json({ ok: false, error: 'Bot username sozlanmagan.' });
   }
 
   const code = generateVerifyCode();
-  VerificationCodes.create(code);
+  await VerificationCodes.create(code);
 
   res.json({
     ok: true,
@@ -1485,8 +1512,8 @@ app.post('/api/verify/start', verifyStartLimiter, (req, res) => {
 // Sayt shu endpointni davriy so'rab turadi (SSE ham bor, lekin tasdiqlashdan
 // OLDIN foydalanuvchi hali autentifikatsiya qilinmagani uchun SSE ulanishi
 // yo'q — shu sababli polling ishonchli variant).
-app.get('/api/verify/status', (req, res) => {
-  const row = VerificationCodes.getByCode(req.query.code);
+app.get('/api/verify/status', async (req, res) => {
+  const row = await VerificationCodes.getByCode(req.query.code);
   if (!row) return res.status(404).json({ ok: false, error: 'Kod topilmadi' });
 
   if (VerificationCodes.isExpired(row)) {
@@ -1504,15 +1531,15 @@ app.get('/api/verify/status', (req, res) => {
     return res.status(410).json({ ok: false, error: 'Bu kod allaqachon ishlatilgan' });
   }
 
-  const user = Users.getById(String(row.telegram_id));
+  const user = await Users.getById(String(row.telegram_id));
   if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
 
   // Avtomatik admin: .env da ko'rsatilgan bo'lsa jadvalga ham yozamiz
-  Admins.ensureEnvAdmin(user.id, { name: user.firstName, username: user.username });
-  const isAdmin = Admins.isAdmin(user.id);
+  await Admins.ensureEnvAdmin(user.id, { name: user.firstName, username: user.username });
+  const isAdmin = await Admins.isAdmin(user.id);
 
   const token = jwt.sign({ id: user.id, username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
-  VerificationCodes.markClaimed(row.code);
+  await VerificationCodes.markClaimed(row.code);
 
   res.json({ ok: true, status: 'verified', verified: true, token, user, isAdmin });
 });
@@ -1531,15 +1558,15 @@ app.get('/api/verify/status', (req, res) => {
 // Endi klient bu endpointdan o'qiydi va localStorage faqat KESH bo'ladi:
 // keshni tahrirlash foydasiz, chunki keyingi sinxronlashda server qiymati
 // ustidan yozadi va tomosha huquqi shu qiymat bo'yicha hisoblanadi.
-app.get('/api/me/entitlements', auth, (req, res) => {
+app.get('/api/me/entitlements', auth, async (req, res) => {
   // Avval muddati o'tgan obunani yopamiz — shunda javob har doim aktual.
   try {
-    Users.expireSubscriptions();
+    await Users.expireSubscriptions();
   } catch (err) {
     console.error('[Entitlements] expireSubscriptions:', err);
   }
 
-  const user = Users.getById(String(req.user.id));
+  const user = await Users.getById(String(req.user.id));
   if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
 
   res.json({
@@ -1574,16 +1601,16 @@ app.get('/api/me/entitlements', auth, (req, res) => {
 //  STATS & AUDIT
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/stats', auth, adminOnly, (req, res) => res.json({
-  ok: true,
-  stats: Stats.dashboard(),
-  sseConnections: sseConnectionCount(),
-}));
+app.get('/api/stats', auth, adminOnly, async (req, res) => {
+  const stats = await Stats.dashboard(),
+  sseConnections: sseConnectionCount(),;
+  res.json({ ok: true, stats });
+});
 
 // ESKI KOD: `Number(req.query.limit) || 100` — manfiy yoki juda katta qiymat
 // to'g'ridan-to'g'ri SQL `LIMIT` ga ketardi, `LIMIT -1` esa SQLite'da
 // "cheklovsiz" degani, ya'ni butun jurnalni bir so'rovda tortib olish mumkin.
-app.get('/api/audit-logs', auth, adminOnly, (req, res) => {
+app.get('/api/audit-logs', auth, adminOnly, async (req, res) => {
   const requested = Number(req.query.limit);
   const limit = Number.isFinite(requested) ? Math.min(Math.max(Math.trunc(requested), 1), 500) : 100;
   res.json({ ok: true, logs: AuditLogs.getAll(limit) });
@@ -1645,7 +1672,7 @@ async function handleTelegramUpdate(update) {
   if (!update) return;
 
   const processCmd = async (receiptId, decision, fromId, chatId, cbId) => {
-    const result = Receipts.review(receiptId, fromId, decision);
+    const result = await Receipts.review(receiptId, fromId, decision);
 
     // Chek topilmasa — botda soxta/xato ID yuborilgan. Ilgari bunday holatda
     // ham "tasdiqlandi" xabari chiqib, hamma klientga broadcast ketardi.
@@ -1707,10 +1734,10 @@ async function handleTelegramUpdate(update) {
   // update ichida `from` obyektini yuboradi. Shuning uchun bot bilan har
   // qanday aloqa — username sinxronlash nuqtasi.
   // Foydalanuvchi ID si ham AYNAN Telegram ID (`from.id`) bo'ladi.
-  Users.syncTelegramProfile(message.from);
+  await Users.syncTelegramProfile(message.from);
 
   // .env da ko'rsatilgan admin bo'lsa — avtomatik ro'yxatga olamiz
-  Admins.ensureEnvAdmin(from, {
+  await Admins.ensureEnvAdmin(from, {
     name: `${message.from.first_name || ''} ${message.from.last_name || ''}`.trim() || `Admin #${from}`,
     username: message.from.username || '',
   });
@@ -1731,7 +1758,7 @@ async function handleTelegramUpdate(update) {
   // ═══════════════════════════════════════════════════════════════════════
   if (txt.startsWith('/start')) {
     // Avval userning holatini tekshiramiz
-    const user = Users.getById(from);
+    const user = await Users.getById(from);
     
     console.log('[Bot /start] User:', from, 'isPhoneVerified:', user?.isPhoneVerified, 'APP_URL:', APP_URL);
     
@@ -1743,7 +1770,7 @@ async function handleTelegramUpdate(update) {
       
       if (code) {
         // Kodni yopamiz
-        VerificationCodes.markVerified(code, from, user.phone);
+        await VerificationCodes.markVerified(code, from, user.phone);
         sendToUser(from, { type: 'verification_complete' });
       }
       
@@ -1778,7 +1805,7 @@ async function handleTelegramUpdate(update) {
     const code = parts.length > 1 ? parts[1].trim() : '';
 
     if (code) {
-      const attached = VerificationCodes.attachChat(code, from, chat);
+      const attached = await VerificationCodes.attachChat(code, from, chat);
       if (!attached) {
         await tgSend(chat, [
           "⚠️ <b>Tasdiqlash kodi yaroqsiz yoki muddati tugagan.</b>",
@@ -1837,7 +1864,7 @@ async function handleTelegramUpdate(update) {
   if (txt.startsWith('/approve_')) await processCmd(txt.replace('/approve_', ''), 'approved', from, chat);
   else if (txt.startsWith('/reject_')) await processCmd(txt.replace('/reject_', ''), 'rejected', from, chat);
   else if (txt === '/stats') {
-    const s = Stats.dashboard();
+    const s = await Stats.dashboard();
     await tgSend(chat, `📊 <b>Statistika</b>\nFoydalanuvchilar: ${s.totalUsers}\nVIP: ${s.vipUsers}\nKontentlar: ${s.totalContent}\nKutilayotgan cheklar: ${s.pendingReceipts}\nDaromad: ${s.totalRevenue} so'm`);
   } else if (txt === '/help') {
     await tgSend(chat, [
@@ -1876,24 +1903,24 @@ async function handleContactVerification(message, from, chat) {
   const normalizedPhone = phone.startsWith('+') ? phone : `+${phone}`;
 
   // Profilni sinxronlab, keyin tasdiqlaymiz
-  Users.syncTelegramProfile(message.from);
-  const user = Users.verifyByContact(from, normalizedPhone);
+  await Users.syncTelegramProfile(message.from);
+  const user = await Users.verifyByContact(from, normalizedPhone);
   if (!user) {
     await tgSend(chat, "⚠️ Hisob topilmadi. Iltimos /start buyrug'ini qaytadan yuboring.");
     return;
   }
 
   // Shu suhbat uchun sayt kutib turgan kod bo'lsa — uni yopamiz
-  const pending = VerificationCodes.findAwaitingByChat(chat);
+  const pending = await VerificationCodes.findAwaitingByChat(chat);
   if (pending) {
-    VerificationCodes.markVerified(pending.code, from, normalizedPhone);
+    await VerificationCodes.markVerified(pending.code, from, normalizedPhone);
   }
 
   // Sayt real-time yangilanishi uchun SSE
   sendToUser(from, { type: 'verification_complete' });
   // REMOVED: broadcastToAdmins - yangi obunachilar haqida admin'larga spam yo'q
 
-  const isAdminUser = Admins.isAdmin(from);
+  const isAdminUser = await Admins.isAdmin(from);
 
   // Tasdiqlangan foydalanuvchiga oddiy xabar
   // Username, ID, Telefon OLIB TASHLANDI - faqat ism va status
@@ -1945,7 +1972,7 @@ function botAdminIds() {
     ids.add(id);
   }
   try {
-    for (const a of Admins.getAll()) ids.add(String(a.id));
+    for (const a of await Admins.getAll()) ids.add(String(a.id));
   } catch (err) {
     console.error('[Bot] Adminlar ro\'yxatini o\'qishda xatolik:', err);
   }
@@ -2054,7 +2081,7 @@ app.post('/api/broadcast', auth, adminOnly, broadcastLimiter, async (req, res) =
   }
 
   try {
-    const allUsers = Users.getAll();
+    const allUsers = await Users.getAll();
     console.log('[Broadcast] Foydalanuvchilar soni:', allUsers.length);
     console.log('[Broadcast] Birinchi 3 ta user:', allUsers.slice(0, 3).map(u => ({ id: u.id, firstName: u.firstName })));
     
@@ -2177,7 +2204,7 @@ app.post('/api/broadcast', auth, adminOnly, broadcastLimiter, async (req, res) =
       }
       
       console.log(`[Broadcast] Tugadi: ${successCount} muvaffaqiyatli, ${blockedCount} bloklagan, Jami: ${allUsers.length}`);
-      AuditLogs.add({ 
+      await AuditLogs.add({ 
         adminId: req.user.id, 
         action: 'BROADCAST', 
         details: `${successCount}/${allUsers.length} ta foydalanuvchiga yuborildi (${blockedCount} bloklagan)` 
@@ -2241,7 +2268,7 @@ const SERVER_OWNED_USER_FIELDS = [
   'isPhoneVerified',
 ];
 
-app.post('/api/sync-user', auth, (req, res) => {
+app.post('/api/sync-user', auth, async (req, res) => {
   try {
     const frontendUser = req.body;
     if (!frontendUser || !frontendUser.id) return res.status(400).json({ ok: false, error: "Foydalanuvchi ma'lumoti yo'q" });
@@ -2250,7 +2277,7 @@ app.post('/api/sync-user', auth, (req, res) => {
       return res.status(403).json({ ok: false, error: 'Ruxsat yo\'q' });
     }
 
-    const backendUser = Users.getById(String(frontendUser.id));
+    const backendUser = await Users.getById(String(frontendUser.id));
     if (!backendUser) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
 
     // Faqat zararsiz maydonlarni frontend qiymati bilan yangilaymiz;
@@ -2260,7 +2287,7 @@ app.post('/api/sync-user', auth, (req, res) => {
       mergedUser[field] = backendUser[field];
     }
 
-    Users.upsert(mergedUser);
+    await Users.upsert(mergedUser);
     res.json({ ok: true, user: mergedUser });
   } catch (err) {
     console.error('[Sync Error]', err);
@@ -2268,7 +2295,7 @@ app.post('/api/sync-user', auth, (req, res) => {
   }
 });
 
-app.post('/api/sync-receipt', auth, (req, res) => {
+app.post('/api/sync-receipt', auth, async (req, res) => {
   try {
     const receipt = req.body;
     if (!receipt || !receipt.id) return res.status(400).json({ ok: false });
@@ -2345,15 +2372,15 @@ app.post('/api/sync-receipt', auth, (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Get current user (for new storage system)
-app.get('/api/me', auth, (req, res) => {
-  const user = Users.getById(req.user.id);
+app.get('/api/me', auth, async (req, res) => {
+  const user = await Users.getById(req.user.id);
   if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
   res.json({ ok: true, user });
 });
 
 // Get user entitlements
-app.get('/api/me/entitlements', auth, (req, res) => {
-  const user = Users.getById(req.user.id);
+app.get('/api/me/entitlements', auth, async (req, res) => {
+  const user = await Users.getById(req.user.id);
   if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
 
   const entitlements = {
@@ -2377,16 +2404,16 @@ app.get('/api/me/entitlements', auth, (req, res) => {
 });
 
 // Content view recording
-app.post('/api/contents/view', (req, res) => {
+app.post('/api/contents/view', async (req, res) => {
   const { contentId, episodeId } = req.body;
   if (!contentId) return res.status(400).json({ ok: false, error: 'contentId kerak' });
 
   try {
-    const content = Contents.getById(contentId);
+    const content = await Contents.getById(contentId);
     if (!content) return res.status(404).json({ ok: false, error: 'Kontent topilmadi' });
 
     const newViewsCount = (content.viewsCount || 0) + 1;
-    Contents.upsert({ ...content, viewsCount: newViewsCount });
+    await Contents.upsert({ ...content, viewsCount: newViewsCount });
 
     res.json({ ok: true });
   } catch (err) {
@@ -2396,17 +2423,17 @@ app.post('/api/contents/view', (req, res) => {
 });
 
 // Content revenue recording (admin only)
-app.post('/api/contents/revenue', auth, adminOnly, (req, res) => {
+app.post('/api/contents/revenue', auth, adminOnly, async (req, res) => {
   const { contentId, amount } = req.body;
   if (!contentId) return res.status(400).json({ ok: false, error: 'contentId kerak' });
   if (!amount || amount < 0) return res.status(400).json({ ok: false, error: 'amount musbat bo\'lishi kerak' });
 
   try {
-    const content = Contents.getById(contentId);
+    const content = await Contents.getById(contentId);
     if (!content) return res.status(404).json({ ok: false, error: 'Kontent topilmadi' });
 
     const newRevenue = (content.revenue || 0) + amount;
-    Contents.upsert({ ...content, revenue: newRevenue });
+    await Contents.upsert({ ...content, revenue: newRevenue });
 
     res.json({ ok: true });
   } catch (err) {
@@ -2416,22 +2443,22 @@ app.post('/api/contents/revenue', auth, adminOnly, (req, res) => {
 });
 
 // Promo code validation
-app.post('/api/promo-codes/validate', auth, (req, res) => {
+app.post('/api/promo-codes/validate', auth, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ ok: false, error: 'code kerak' });
 
-  const result = PromoCodes.validate(code);
+  const result = await PromoCodes.validate(code);
   res.json({ ok: true, ...result });
 });
 
 // Get promo codes (admin only)
-app.get('/api/promo-codes', auth, adminOnly, (req, res) => {
-  res.json({ ok: true, promoCodes: PromoCodes.getAll() });
+app.get('/api/promo-codes', auth, adminOnly, async (req, res) => {
+  res.json({ ok: true, promoCodes: await PromoCodes.getAll() });
 });
 
 // Check expired subscriptions
-app.get('/api/subscriptions/check-expired', auth, adminOnly, (req, res) => {
-  const allUsers = Users.getAll();
+app.get('/api/subscriptions/check-expired', auth, adminOnly, async (req, res) => {
+  const allUsers = await Users.getAll();
   let expired = 0;
   const now = Date.now();
 
@@ -2439,7 +2466,7 @@ app.get('/api/subscriptions/check-expired', auth, adminOnly, (req, res) => {
     if (u.isVip && u.vipExpiresAt) {
       const expiryTime = new Date(u.vipExpiresAt).getTime();
       if (now > expiryTime) {
-        Users.revokeVip(u.id);
+        await Users.revokeVip(u.id);
         expired++;
       }
     }
@@ -2449,14 +2476,14 @@ app.get('/api/subscriptions/check-expired', auth, adminOnly, (req, res) => {
 });
 
 // Instant purchase
-app.post('/api/purchase/instant', auth, (req, res) => {
+app.post('/api/purchase/instant', auth, async (req, res) => {
   const { contentId, episodeId, amount } = req.body;
   const userId = req.user.id;
 
   if (!contentId) return res.status(400).json({ ok: false, error: 'contentId kerak' });
   if (!amount || amount < 0) return res.status(400).json({ ok: false, error: 'amount musbat bo\'lishi kerak' });
 
-  const user = Users.getById(userId);
+  const user = await Users.getById(userId);
   if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
 
   if (user.bonusBalance < amount) {
@@ -2470,27 +2497,27 @@ app.post('/api/purchase/instant', auth, (req, res) => {
     if (!unlockedEpisodes.includes(episodeId)) {
       unlockedEpisodes.push(episodeId);
     }
-    Users.upsert({ ...user, bonusBalance: newBalance, unlockedEpisodeIds: unlockedEpisodes });
+    await Users.upsert({ ...user, bonusBalance: newBalance, unlockedEpisodeIds: unlockedEpisodes });
   } else {
     const purchased = [...(user.purchasedContentIds || [])];
     if (!purchased.includes(contentId)) {
       purchased.push(contentId);
     }
-    Users.upsert({ ...user, bonusBalance: newBalance, purchasedContentIds: purchased });
+    await Users.upsert({ ...user, bonusBalance: newBalance, purchasedContentIds: purchased });
   }
 
   // Record revenue
-  const content = Contents.getById(contentId);
+  const content = await Contents.getById(contentId);
   if (content) {
     const newRevenue = (content.revenue || 0) + amount;
-    Contents.upsert({ ...content, revenue: newRevenue });
+    await Contents.upsert({ ...content, revenue: newRevenue });
   }
 
   res.json({ ok: true, message: 'Xarid muvaffaqiyatli amalga oshirildi' });
 });
 
 // Token unlock - YANGI QOIDA: Faqat seriallar, har 10 qismga 1 ta qism ochish
-app.post('/api/tokens/unlock', auth, (req, res) => {
+app.post('/api/tokens/unlock', auth, async (req, res) => {
   const { contentId, episodeId, tokensUsed } = req.body;
   const userId = req.user.id;
 
@@ -2498,11 +2525,11 @@ app.post('/api/tokens/unlock', auth, (req, res) => {
   if (!episodeId) return res.status(400).json({ ok: false, error: 'episodeId kerak - faqat qismlar uchun' });
   if (!tokensUsed || tokensUsed < 0) return res.status(400).json({ ok: false, error: 'tokensUsed musbat bo\'lishi kerak' });
 
-  const user = Users.getById(userId);
+  const user = await Users.getById(userId);
   if (!user) return res.status(404).json({ ok: false, error: 'Foydalanuvchi topilmadi' });
 
   // Content'ni olish
-  const content = Contents.getById(contentId);
+  const content = await Contents.getById(contentId);
   if (!content) return res.status(404).json({ ok: false, error: 'Kontent topilmadi' });
 
   // FAQAT SERIALLAR
@@ -2545,10 +2572,10 @@ app.post('/api/tokens/unlock', auth, (req, res) => {
     allUnlockedEpisodes.push(episodeKey);
   }
   
-  Users.upsert({ ...user, accessTokens: newTokens, unlockedEpisodeIds: allUnlockedEpisodes });
-  TokenUnlock.record(userId, contentId, episodeId, tokensUsed);
+  await Users.upsert({ ...user, accessTokens: newTokens, unlockedEpisodeIds: allUnlockedEpisodes });
+  await TokenUnlock.record(userId, contentId, episodeId, tokensUsed);
   
-  AuditLogs.add({
+  await AuditLogs.add({
     adminId: userId,
     action: 'TOKEN_UNLOCK_EPISODE',
     targetId: episodeKey,
@@ -2562,14 +2589,14 @@ app.post('/api/tokens/unlock', auth, (req, res) => {
 });
 
 // Daily check-in state
-app.get('/api/daily-checkin/state', auth, (req, res) => {
-  const status = DailyCheckIn.getStatus(req.user.id);
+app.get('/api/daily-checkin/state', auth, async (req, res) => {
+  const status = await DailyCheckIn.getStatus(req.user.id);
   res.json({ ok: true, state: status });
 });
 
 // Daily check-in claim
-app.post('/api/daily-checkin/claim', auth, (req, res) => {
-  const result = DailyCheckIn.claim(req.user.id);
+app.post('/api/daily-checkin/claim', auth, async (req, res) => {
+  const result = await DailyCheckIn.claim(req.user.id);
   
   if (!result.success) {
     return res.status(400).json({ ok: false, message: result.message });
@@ -2579,11 +2606,11 @@ app.post('/api/daily-checkin/claim', auth, (req, res) => {
 });
 
 // ─── Health ─────────────────────────────────────────────────────────────────
-// ESKI KOD: bu endpoint autentifikatsiyasiz `Stats.dashboard()` ni qaytarardi,
+// ESKI KOD: bu endpoint autentifikatsiyasiz `await Stats.dashboard()` ni qaytarardi,
 // ya'ni istalgan odam foydalanuvchilar soni, VIP soni va UMUMIY DAROMADni
 // (totalRevenue) ko'ra olardi. Endi health faqat "tirikmi?" degan savolga
 // javob beradi; biznes ko'rsatkichlari /api/stats da, admin himoyasi ostida.
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   res.json({
     status: 'ok',
     service: 'MANYAK TV SQLite Backend',
@@ -2630,7 +2657,7 @@ app.post('/api/bot/reconnect', auth, adminOnly, async (req, res) => {
 // ─── Static (production) ──────────────────────────────────────────────────
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
-app.get('*', (req, res) => {
+app.get('*', async (req, res) => {
   if (req.path.startsWith('/api/') || req.path === '/webhook') return res.status(404).json({ error: 'Not found' });
 
   // `dist/` yo'q bo'lsa (build qilinmagan) `sendFile` xato tashlaydi va
@@ -2657,7 +2684,7 @@ app.use((err, req, res, next) => {
 });
 
 // ─── Obunalarni avtomatik tugatish ──────────────────────────────────────────
-// ESKI KOD: `Users.expireSubscriptions()` database.js da yozilgan, lekin
+// ESKI KOD: `await Users.expireSubscriptions()` database.js da yozilgan, lekin
 // BUTUN LOYIHADA HECH QAYERDA CHAQIRILMAGAN edi. Natijada serverda VIP hech
 // qachon tugamasdi: muddati o'tgan foydalanuvchiga /api/sync-user va
 // /api/me/entitlements doim `isVip: true` qaytarib berardi.
@@ -2665,7 +2692,7 @@ app.use((err, req, res, next) => {
 // foydalanuvchi localStorage'ni tozalab, obunani "tiklab" olishi mumkin edi.
 function runExpirySweep() {
   try {
-    const result = Users.expireSubscriptions();
+    const result = await Users.expireSubscriptions();
     if (result?.changes > 0) {
       console.log(`[Expiry] ${result.changes} ta muddati o'tgan VIP obuna yopildi`);
     }
@@ -2725,9 +2752,9 @@ async function startPolling() {
 
   // Bot username'ini bazaga yozamiz
   try {
-    const current = Settings.get();
+    const current = await Settings.get();
     if (current.botUsername !== me.result.username) {
-      Settings.update({ botUsername: me.result.username, telegramBotUsername: me.result.username });
+      await Settings.update({ botUsername: me.result.username, telegramBotUsername: me.result.username });
       console.log(`[Bot] Bot username sozlamalarga yozildi: @${me.result.username}`);
     }
   } catch (err) {
@@ -2794,9 +2821,9 @@ async function setupBotWebhook() {
 
   // Bot username'ini bazaga yozamiz — `/api/verify/start` deep link uchun kerak
   try {
-    const current = Settings.get();
+    const current = await Settings.get();
     if (current.botUsername !== me.result.username) {
-      Settings.update({ botUsername: me.result.username, telegramBotUsername: me.result.username });
+      await Settings.update({ botUsername: me.result.username, telegramBotUsername: me.result.username });
       console.log(`[Bot] Bot username sozlamalarga yozildi: @${me.result.username}`);
     }
   } catch (err) {
@@ -2897,19 +2924,19 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Barcha backuplar ro'yxati
-app.get('/api/backups', auth, adminOnly, (req, res) => {
+app.get('/api/backups', auth, adminOnly, async (req, res) => {
   const backups = Backup.list();
   res.json({ ok: true, backups });
 });
 
 // Yangi backup yaratish
-app.post('/api/backups/create', auth, adminOnly, (req, res) => {
+app.post('/api/backups/create', auth, adminOnly, async (req, res) => {
   const result = Backup.create();
   res.json(result.success ? { ok: true, backup: result.path } : { ok: false, error: result.error });
 });
 
 // Backupdan tiklash (EHTIYOTLIK BILAN!)
-app.post('/api/backups/restore', auth, adminOnly, (req, res) => {
+app.post('/api/backups/restore', auth, adminOnly, async (req, res) => {
   const { backupPath } = req.body;
   if (!backupPath) {
     return res.status(400).json({ ok: false, error: 'backupPath kerak' });
@@ -2920,7 +2947,7 @@ app.post('/api/backups/restore', auth, adminOnly, (req, res) => {
 });
 
 // ═══ HEALTH CHECK ENDPOINT (Load Balancer uchun) ═══
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
   try {
     // Database connectivity check
     const dbCheck = db.prepare('SELECT 1 as health').get();
@@ -2959,7 +2986,7 @@ app.get('/health', (req, res) => {
 });
 
 // Simplified health check (for basic load balancer checks)
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   res.status(200).send('OK');
 });
 
