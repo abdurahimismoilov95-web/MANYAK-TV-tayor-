@@ -1594,8 +1594,19 @@ export function isUserSuperAdmin(userId?: string): boolean {
 
 export function isUserAdmin(userId?: string): boolean {
   if (!userId) return false;
-  if (!serverVerifiedAdminId) return false;
-  return serverVerifiedAdminId === String(userId).trim();
+  const cleanId = String(userId).trim();
+  
+  // 1. Super admin tekshiruvi (serverVerifiedAdminId)
+  if (serverVerifiedAdminId && serverVerifiedAdminId === cleanId) {
+    return true;
+  }
+  
+  // 2. Qo'shilgan adminlar ro'yxatini tekshirish
+  const settings = getStoredSettings();
+  const appointedAdmins = settings.appointedAdmins || [];
+  const isAppointed = appointedAdmins.some((admin) => admin.id === cleanId);
+  
+  return isAppointed;
 }
 
 export function getUserAdminPermissions(userId?: string): AdminPermissions | null {
