@@ -36,7 +36,7 @@ import {
   Users, Receipts, Contents, Plans, PromoCodes, WatchHistory,
   Favorites, Settings, Admins, AuditLogs, BannedDevices,
   Comments, DailyCheckIn, Stats, VerificationCodes,
-  initializeSchema, pool, query, inTransaction
+  initializeSchema, pool, query, inTransaction, seedIfEmpty
 } from './database.pg.js';
 
 // Note: PostgreSQL version does not export these (they were SQLite specific):
