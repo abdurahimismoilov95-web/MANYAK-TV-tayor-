@@ -37,8 +37,8 @@ import {
   Favorites, Settings, Admins, AuditLogs, BannedDevices,
   Comments, DailyCheckIn, Stats, VerificationCodes,
   TokenUnlock, Backup,
-  db, DB_PATH, initializeDatabase, seedIfEmpty
-} from './database.js'; // ⭐ FIXED: SQLite versiya (`.pg.js` emas!)
+  db, DB_PATH, SUPER_ADMIN_ID, seedIfEmpty
+} from './database.js'; // ⭐ SQLite versiya
 const SUPER_ADMIN_ID = process.env.SUPER_ADMIN_ID || '891846690';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
