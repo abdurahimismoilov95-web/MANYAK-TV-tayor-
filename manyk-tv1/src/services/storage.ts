@@ -1630,7 +1630,10 @@ export function isUserAdmin(userId?: string): boolean {
   const appointedAdmins = settings.appointedAdmins || [];
   const isAppointed = appointedAdmins.some((admin) => admin.id === cleanId);
   
-  console.log('[isUserAdmin] appointedAdmins:', appointedAdmins.map(a => a.id));
+  console.log('[isUserAdmin] Full settings:', settings);
+  console.log('[isUserAdmin] appointedAdmins:', appointedAdmins);
+  console.log('[isUserAdmin] appointedAdmins IDs:', appointedAdmins.map(a => a.id));
+  console.log('[isUserAdmin] Checking for ID:', cleanId);
   console.log('[isUserAdmin] isAppointed:', isAppointed);
   console.log('[isUserAdmin] Final result:', isAppointed);
   
