@@ -2965,10 +2965,6 @@ function shutdown(signal, exitCode = 0) {
     } catch (err) {
       console.error('[Shutdown] Database yopishda xatolik:', err);
     }
-      console.log('[Shutdown] PostgreSQL pool yopildi');
-    } catch (err) {
-      console.error('[Shutdown] DB yopishda xatolik:', err);
-    }
     process.exit(exitCode);
   });
 
