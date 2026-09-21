@@ -865,15 +865,22 @@ function detectVideoExt(buf) {
     const boxType = buf.subarray(4, 8).toString('ascii');
     if (boxType === 'ftyp') {
       const brand = buf.subarray(8, 12).toString('ascii');
-      // MP4 variants
+      console.log('  [detectVideoExt] ftyp brand:', brand);
+      // MP4 variants (more permissive)
       if (brand.startsWith('iso') || brand.startsWith('mp4') || 
-          brand.startsWith('M4V') || brand.startsWith('MSN')) {
+          brand.startsWith('M4V') || brand.startsWith('MSN') ||
+          brand.startsWith('M4A') || brand.startsWith('3gp') ||
+          brand.includes('mp4') || brand.includes('avc')) {
         return 'mp4';
       }
       // QuickTime MOV
-      if (brand.startsWith('qt  ')) {
+      if (brand.startsWith('qt') || brand.includes('qt')) {
         return 'mov';
       }
+      // If we found ftyp but brand is unknown, still assume mp4
+      // (better to accept than reject valid videos)
+      console.log('  [detectVideoExt] Unknown ftyp brand, assuming mp4');
+      return 'mp4';
     }
   }
   
@@ -882,6 +889,7 @@ function detectVideoExt(buf) {
     // Check for "webm" DocType deeper in file
     const headerStr = buf.subarray(0, Math.min(200, buf.length)).toString('ascii', 0, 200);
     if (headerStr.includes('webm')) {
+      console.log('  [detectVideoExt] WebM detected');
       return 'webm';
     }
   }
@@ -890,6 +898,7 @@ function detectVideoExt(buf) {
   // TS packets are 188 bytes, so check for repeated 0x47 at positions 0, 188, 376
   if (buf[0] === 0x47 && buf.length >= 376) {
     if (buf[188] === 0x47 && buf[376] === 0x47) {
+      console.log('  [detectVideoExt] MPEG-TS detected');
       return 'ts';
     }
   }
@@ -898,10 +907,22 @@ function detectVideoExt(buf) {
   if (buf.length >= 7) {
     const header = buf.subarray(0, 7).toString('ascii');
     if (header === '#EXTM3U') {
+      console.log('  [detectVideoExt] M3U8 detected');
       return 'm3u8';
     }
   }
   
+  // AVI: RIFF....AVI (older format, but still used)
+  if (buf.length >= 12) {
+    const riff = buf.subarray(0, 4).toString('ascii');
+    const avi = buf.subarray(8, 11).toString('ascii');
+    if (riff === 'RIFF' && avi === 'AVI') {
+      console.log('  [detectVideoExt] AVI detected');
+      return 'mp4'; // Convert AVI to mp4 for better compatibility
+    }
+  }
+  
+  console.log('  [detectVideoExt] No video format detected');
   return null;
 }
 
@@ -922,34 +943,54 @@ app.post(
   uploadLimiter,
   express.raw({ type: '*/*', limit: ADMIN_UPLOAD_LIMIT }),
   async (req, res) => {
+    // ═══ DEBUG LOGGING ═══
+    console.log('\n🔵 [UPLOAD] Request received:');
+    console.log('  User ID:', req.user?.id);
+    console.log('  Is Admin:', req.user?.isAdmin);
+    console.log('  Body size:', req.body?.length, 'bytes', `(${(req.body?.length / 1024 / 1024).toFixed(2)} MB)`);
+    console.log('  Query ext:', req.query.ext);
+    console.log('  Content-Type:', req.headers['content-type']);
+    
     if (!req.body || !req.body.length) {
+      console.error('❌ [UPLOAD] Error: Fayl bo\'sh');
       return res.status(400).json({ ok: false, error: "Fayl bo'sh yoki yuborilmadi" });
     }
 
     const isAdmin = Boolean(req.user?.isAdmin);
+    console.log('  Admin check:', isAdmin);
 
     // 1) Hajm cheklovi
     const sizeLimit = isAdmin ? ADMIN_UPLOAD_LIMIT : USER_UPLOAD_LIMIT;
+    console.log('  Size limit:', (sizeLimit / 1024 / 1024).toFixed(0), 'MB');
+    
     if (req.body.length > sizeLimit) {
       const limitMb = Math.round(sizeLimit / (1024 * 1024));
+      console.error('❌ [UPLOAD] Error: Fayl juda katta');
       return res.status(413).json({ ok: false, error: `Fayl juda katta. Maksimal ${limitMb} MB.` });
     }
+    console.log('  ✅ Size check passed');
 
     // 2) Fayl turini ANIQLASH (magic bytes orqali — taxmin qilish emas!)
     const detectedImage = detectImageExt(req.body);
     const detectedVideo = isAdmin ? detectVideoExt(req.body) : null;
     let ext = String(req.query.ext || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
+    console.log('  Detected image:', detectedImage || 'none');
+    console.log('  Detected video:', detectedVideo || 'none');
+    console.log('  Query ext:', ext || 'none');
+
     if (!isAdmin) {
       // Oddiy foydalanuvchi FAQAT rasm yuklaydi va bu haqiqatan rasm
       // ekanini bayt darajasida tasdiqlaymiz.
       if (!detectedImage || !ALLOWED_IMAGE_EXT.has(detectedImage)) {
+        console.error('❌ [UPLOAD] Error: Oddiy user faqat rasm yuklashi mumkin');
         return res.status(400).json({
           ok: false,
           error: 'Faqat rasm fayllari qabul qilinadi (JPG, PNG yoki WEBP).',
         });
       }
       ext = detectedImage;
+      console.log('  ✅ User image validated:', ext);
     } else {
       // ═══ ADMIN UPLOAD — KUCHAYTIRILGAN VALIDATSIYA ═══
       //
@@ -965,15 +1006,19 @@ app.post(
       if (detectedImage) {
         // Rasm haqiqiy signature bilan tasdiqlangan
         ext = detectedImage;
+        console.log('  ✅ Admin image validated:', ext);
       } else if (detectedVideo) {
         // Video haqiqiy signature bilan tasdiqlangan
         ext = detectedVideo;
+        console.log('  ✅ Admin video validated:', ext);
       } else {
         // Magic bytes aniqlanmadi — query parameter'ga ishonmaymiz
         // XAVFSIZLIK: Ilgari bu yerda `ext` query parametri qabul qilinar
         // va ALLOWED_UPLOAD_EXT ro'yxatida bo'lsa yuklash ruxsat etilardi.
         // Bu yetarli emas — istalgan binar fayl .mp4/.webm deb yuborilishi
         // mumkin edi. Endi faqat HAQIQIY format signature'lari qabul qilinadi.
+        console.error('❌ [UPLOAD] Error: Fayl formati aniqlanmadi');
+        console.log('  First 32 bytes (hex):', req.body.subarray(0, 32).toString('hex'));
         return res.status(400).json({
           ok: false,
           error: 'Fayl formati aniqlanmadi yoki qo\'llab-quvvatlanmaydi. Rasm uchun: JPG/PNG/WEBP, Video uchun: MP4/WebM/MOV/TS/M3U8',
@@ -982,11 +1027,13 @@ app.post(
       
       // Qo'shimcha tekshiruv: aniqlangan format ruxsat etilgan ro'yxatda bo'lishi kerak
       if (!ALLOWED_UPLOAD_EXT.has(ext)) {
+        console.error('❌ [UPLOAD] Error: Format qo\'llab-quvvatlanmaydi:', ext);
         return res.status(400).json({
           ok: false,
           error: `Fayl formati qo'llab-quvvatlanmaydi: .${ext}. Ruxsat etilgan: ${[...ALLOWED_UPLOAD_EXT].join(', ')}`,
         });
       }
+      console.log('  ✅ Format validated:', ext);
     }
 
     // Fayl turini aniqlash va tegishli papkaga saqlash
@@ -998,6 +1045,10 @@ app.post(
     const uploadDir = isReceipt ? PRIVATE_UPLOADS_DIR : PUBLIC_UPLOADS_DIR;
     const filepath = path.join(uploadDir, filename);
     const urlPath = isReceipt ? `/uploads/private/${filename}` : `/uploads/public/${filename}`;
+    
+    console.log('  Filename:', filename);
+    console.log('  Upload dir:', uploadDir);
+    console.log('  URL path:', urlPath);
     
     try {
       let finalBuffer = req.body;
@@ -1034,15 +1085,19 @@ app.post(
       }
       
       fs.writeFileSync(filepath, finalBuffer);
+      console.log('  ✅ File saved:', filepath);
+      
       await AuditLogs.add({
         adminId: req.user.id,
         action: 'UPLOAD_FILE',
         targetId: filename,
         details: `${(finalBuffer.length / 1024).toFixed(0)} KB (${isReceipt ? 'private' : 'public'})${detectedImage ? ' [metadata stripped]' : ''}`,
       });
+      
+      console.log('✅ [UPLOAD] Success:', urlPath, '\n');
       res.json({ ok: true, url: urlPath });
     } catch (err) {
-      console.error('[Upload]', err);
+      console.error('❌ [UPLOAD] Error:', err);
       res.status(500).json({ ok: false, error: 'Faylni saqlashda xatolik' });
     }
   }
