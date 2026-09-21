@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: manyak-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-manyak_secret}
+      POSTGRES_DB: manyak_tv
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - manyak-network
+    restart: unless-stopped
+
+  # Redis (for Bull Queue)
+  redis:
+    image: redis:7-alpine
+    container_name: manyak-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - manyak-network
+    restart: unless-stopped
+
+  # API Service
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: manyak-api
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-manyak_secret}@postgres:5432/manyak_tv
+      - JWT_SECRET=${JWT_SECRET:-your_jwt_secret}
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    networks:
+      - manyak-network
+    restart: unless-stopped
+
+  # Bot Service
+  bot:
+    build:
+      context: ./apps/bot
+      dockerfile: Dockerfile
+    container_name: manyak-bot
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-manyak_secret}@postgres:5432/manyak_tv
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WEB_APP_URL=${WEB_APP_URL}
+      - BOT_PORT=3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      - postgres
+    networks:
+      - manyak-network
+    restart: unless-stopped
+
+  # Encoder Service
+  encoder:
+    build:
+      context: ./apps/encoder
+      dockerfile: Dockerfile
+    container_name: manyak-encoder
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-manyak_secret}@postgres:5432/manyak_tv
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - ENCODER_PORT=3002
+    ports:
+      - "3002:3002"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - manyak-network
+    restart: unless-stopped
+
+  # Frontend (Web App)
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: manyak-web
+    environment:
+      - VITE_API_URL=${API_URL:-http://localhost:3000/api}
+    ports:
+      - "5173:80"
+    networks:
+      - manyak-network
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: manyak-nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - uploads:/var/www/uploads:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+      - bot
+      - encoder
+      - web
+    networks:
+      - manyak-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  uploads:
+
+networks:
+  manyak-network:
+    driver: bridge
