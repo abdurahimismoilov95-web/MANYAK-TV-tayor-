@@ -201,8 +201,8 @@ if (!IS_PROD && (!process.env.JWT_SECRET || !process.env.WEBHOOK_SECRET)) {
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '2gb' }));
+app.use(express.urlencoded({ extended: true, limit: '2gb' }));
 
 // ─── Multer (File Upload) ──────────────────────────────────────────────────
 // uploads/ papkasini yaratish
@@ -237,7 +237,7 @@ const fileFilter = (req, file, cb) => {
 // Multer instance
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB max
   fileFilter: fileFilter
 });
 
