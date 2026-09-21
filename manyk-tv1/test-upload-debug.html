@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Upload Debug Test - MANYAK TV</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+      color: #fff;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: rgba(255,255,255,0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 20px;
+      padding: 30px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+    h1 { margin-bottom: 10px; font-size: 28px; }
+    .subtitle { opacity: 0.8; margin-bottom: 30px; }
+    .section {
+      background: rgba(255,255,255,0.05);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .section h2 {
+      font-size: 18px;
+      margin-bottom: 15px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-left: auto;
+    }
+    .status.loading { background: #fbbf24; color: #92400e; }
+    .status.success { background: #10b981; color: #064e3b; }
+    .status.error { background: #ef4444; color: #7f1d1d; }
+    .status.pending { background: #6b7280; color: #f3f4f6; }
+    .info-grid {
+      display: grid;
+      gap: 10px;
+      font-size: 14px;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 6px;
+    }
+    .info-label { opacity: 0.7; }
+    .info-value {
+      font-weight: 600;
+      text-align: right;
+      word-break: break-all;
+      max-width: 400px;
+    }
+    .btn {
+      background: #fff;
+      color: #667eea;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      transition: transform 0.2s;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .file-input {
+      display: none;
+    }
+    .log {
+      background: #000;
+      color: #0f0;
+      padding: 15px;
+      border-radius: 8px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-entry {
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+    .log-time { color: #666; }
+    .log-info { color: #0ff; }
+    .log-success { color: #0f0; font-weight: bold; }
+    .log-error { color: #f00; font-weight: bold; }
+    .log-warn { color: #ff0; }
+    .error-box {
+      background: rgba(239, 68, 68, 0.2);
+      border: 2px solid #ef4444;
+      border-radius: 8px;
+      padding: 15px;
+      margin-top: 15px;
+    }
+    .error-box h3 {
+      color: #fca5a5;
+      margin-bottom: 8px;
+      font-size: 16px;
+    }
+    .error-box p {
+      font-size: 14px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔍 Upload Debug Test</h1>
+    <p class="subtitle">MANYAK TV - Admin Panel Upload Diagnostics</p>
+
+    <!-- User Info Section -->
+    <div class="section">
+      <h2>
+        👤 Foydalanuvchi Ma'lumotlari
+        <span class="status pending" id="userStatus">Tekshirilmoqda...</span>
+      </h2>
+      <div class="info-grid" id="userInfo">
+        <div class="info-row">
+          <span class="info-label">User ID:</span>
+          <span class="info-value" id="userId">—</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Telegram ID:</span>
+          <span class="info-value" id="telegramId">—</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Is Admin:</span>
+          <span class="info-value" id="isAdmin">—</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Phone Verified:</span>
+          <span class="info-value" id="isVerified">—</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">JWT Token:</span>
+          <span class="info-value" id="hasToken">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Server Connection Section -->
+    <div class="section">
+      <h2>
+        🌐 Server Ulanish
+        <span class="status pending" id="serverStatus">Tekshirilmoqda...</span>
+      </h2>
+      <div class="info-grid" id="serverInfo">
+        <div class="info-row">
+          <span class="info-label">Backend URL:</span>
+          <span class="info-value" id="backendUrl">—</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Server Holati:</span>
+          <span class="info-value" id="serverHealth">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Upload Test Section -->
+    <div class="section">
+      <h2>
+        📤 Fayl Yuklash Test
+        <span class="status pending" id="uploadStatus">Test o'tkazilmagan</span>
+      </h2>
+      <input type="file" id="fileInput" class="file-input" accept="image/*,video/*">
+      <button class="btn" id="uploadBtn">📂 Fayl Tanlang va Yuklang</button>
+      
+      <div id="errorBox" style="display:none;" class="error-box">
+        <h3>❌ Xato Aniqlandi</h3>
+        <p id="errorMessage"></p>
+      </div>
+    </div>
+
+    <!-- Log Section -->
+    <div class="section">
+      <h2>📋 Debug Log</h2>
+      <div class="log" id="logOutput"></div>
+    </div>
+  </div>
+
+  <script>
+    const log = [];
+    const logOutput = document.getElementById('logOutput');
+
+    function addLog(message, type = 'info') {
+      const time = new Date().toLocaleTimeString('uz-UZ');
+      const entry = { time, message, type };
+      log.push(entry);
+      
+      const logEntry = document.createElement('div');
+      logEntry.className = 'log-entry';
+      logEntry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-${type}">${message}</span>`;
+      logOutput.appendChild(logEntry);
+      logOutput.scrollTop = logOutput.scrollHeight;
+    }
+
+    function showError(message) {
+      const errorBox = document.getElementById('errorBox');
+      const errorMessage = document.getElementById('errorMessage');
+      errorMessage.textContent = message;
+      errorBox.style.display = 'block';
+      addLog(message, 'error');
+    }
+
+    async function checkUserInfo() {
+      addLog('🔍 Foydalanuvchi ma\'lumotlarini tekshirish...', 'info');
+      
+      try {
+        const raw = localStorage.getItem('manyak_tv_current_user_v1');
+        if (!raw) {
+          document.getElementById('userStatus').textContent = 'Topilmadi';
+          document.getElementById('userStatus').className = 'status error';
+          showError('❌ LocalStorage\'da foydalanuvchi ma\'lumotlari yo\'q! Telegram bot orqali tasdiqlang.');
+          return null;
+        }
+
+        const user = JSON.parse(raw);
+        document.getElementById('userId').textContent = user.id || 'N/A';
+        document.getElementById('telegramId').textContent = user.telegramId || 'N/A';
+        document.getElementById('isAdmin').textContent = user.isAdmin ? '✅ TRUE' : '❌ FALSE';
+        document.getElementById('isVerified').textContent = user.isPhoneVerified ? '✅ TRUE' : '❌ FALSE';
+        
+        if (!user.isAdmin) {
+          document.getElementById('userStatus').textContent = 'Admin emas';
+          document.getElementById('userStatus').className = 'status error';
+          showError('❌ Siz admin emassiz! initialData.ts\'da adminTelegramIds ro\'yxatiga Telegram ID\'ngizni qo\'shing.');
+          return null;
+        }
+
+        // Check JWT token
+        const tokenRaw = localStorage.getItem('manyak_tv_auth_token_v1');
+        if (!tokenRaw) {
+          document.getElementById('hasToken').textContent = '❌ Yo\'q';
+          showError('⚠️ JWT token topilmadi. Telegram bot orqali qayta tasdiqlang.');
+        } else {
+          try {
+            const tokenData = JSON.parse(tokenRaw);
+            if (tokenData.expiresAt && Date.now() < tokenData.expiresAt) {
+              document.getElementById('hasToken').textContent = '✅ Bor (amal qiladi)';
+              addLog('✅ JWT token amal qilmoqda', 'success');
+            } else {
+              document.getElementById('hasToken').textContent = '⚠️ Eskirgan';
+              showError('⚠️ JWT token eskirgan. Sahifani refresh qiling.');
+            }
+          } catch {
+            document.getElementById('hasToken').textContent = '⚠️ Noto\'g\'ri format';
+          }
+        }
+
+        document.getElementById('userStatus').textContent = '✅ Admin';
+        document.getElementById('userStatus').className = 'status success';
+        addLog(`✅ User: ${user.id} (Admin: ${user.isAdmin})`, 'success');
+        return user;
+      } catch (err) {
+        document.getElementById('userStatus').textContent = 'Xato';
+        document.getElementById('userStatus').className = 'status error';
+        showError(`Xato: ${err.message}`);
+        return null;
+      }
+    }
+
+    async function checkServerConnection() {
+      addLog('🌐 Server ulanishini tekshirish...', 'info');
+      document.getElementById('backendUrl').textContent = window.location.origin;
+      
+      try {
+        const res = await fetch('/api/health');
+        if (res.ok) {
+          document.getElementById('serverHealth').textContent = '✅ Ishlayapti';
+          document.getElementById('serverStatus').textContent = '✅ Ulandi';
+          document.getElementById('serverStatus').className = 'status success';
+          addLog('✅ Server ishlayapti', 'success');
+        } else {
+          document.getElementById('serverHealth').textContent = `❌ Xato (${res.status})`;
+          document.getElementById('serverStatus').textContent = 'Xato';
+          document.getElementById('serverStatus').className = 'status error';
+          showError(`Server ${res.status} javob qaytardi. Server ishlab turganini tekshiring.`);
+        }
+      } catch (err) {
+        document.getElementById('serverHealth').textContent = '❌ Ulanmadi';
+        document.getElementById('serverStatus').textContent = 'Ulanmadi';
+        document.getElementById('serverStatus').className = 'status error';
+        showError(`Server'ga ulanib bo'lmadi: ${err.message}. \n\nServer ishga tushganini tekshiring: npm run dev`);
+      }
+    }
+
+    async function testUpload(file) {
+      addLog(`📤 Fayl yuklash boshlandi: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'info');
+      document.getElementById('uploadStatus').textContent = 'Yuklanmoqda...';
+      document.getElementById('uploadStatus').className = 'status loading';
+      document.getElementById('uploadBtn').disabled = true;
+
+      try {
+        // Get auth token
+        const tokenRaw = localStorage.getItem('manyak_tv_auth_token_v1');
+        if (!tokenRaw) {
+          throw new Error('JWT token topilmadi. Telegram bot orqali tasdiqlang.');
+        }
+
+        const tokenData = JSON.parse(tokenRaw);
+        if (!tokenData.token) {
+          throw new Error('JWT token noto\'g\'ri formatda.');
+        }
+
+        addLog('🔐 JWT token olingan', 'info');
+
+        const ext = file.name.split('.').pop() || '';
+        addLog(`📄 Fayl kengaytmasi: .${ext}`, 'info');
+
+        const xhr = new XMLHttpRequest();
+        
+        xhr.upload.onprogress = (evt) => {
+          if (evt.lengthComputable) {
+            const percent = ((evt.loaded / evt.total) * 100).toFixed(0);
+            addLog(`⏳ Progress: ${percent}%`, 'info');
+          }
+        };
+
+        xhr.onload = () => {
+          addLog(`📥 Server javobi: Status ${xhr.status}`, xhr.status === 200 ? 'success' : 'error');
+          addLog(`📄 Response: ${xhr.responseText}`, 'info');
+
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (xhr.status >= 200 && xhr.status < 300 && data.ok && data.url) {
+              addLog(`✅ MUVAFFAQIYAT! URL: ${data.url}`, 'success');
+              document.getElementById('uploadStatus').textContent = '✅ Muvaffaqiyatli';
+              document.getElementById('uploadStatus').className = 'status success';
+              alert(`✅ Yuklash muvaffaqiyatli!\n\nURL: ${data.url}\n\nEndi admin panel'da bu URL ishlatiladi.`);
+            } else {
+              throw new Error(data.error || `HTTP ${xhr.status}`);
+            }
+          } catch (err) {
+            throw new Error(`Server javobini parse qilish xatosi: ${err.message}\n\nResponse: ${xhr.responseText}`);
+          }
+        };
+
+        xhr.onerror = () => {
+          throw new Error('Tarmoq xatosi. Server ishlab turganini tekshiring.');
+        };
+
+        xhr.open('POST', `/api/upload?ext=${encodeURIComponent(ext)}`, true);
+        xhr.setRequestHeader('Authorization', `Bearer ${tokenData.token}`);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+        addLog('📡 So\'rov yuborilmoqda...', 'info');
+        xhr.send(file);
+
+      } catch (err) {
+        addLog(`❌ XATO: ${err.message}`, 'error');
+        document.getElementById('uploadStatus').textContent = '❌ Xato';
+        document.getElementById('uploadStatus').className = 'status error';
+        showError(err.message);
+      } finally {
+        document.getElementById('uploadBtn').disabled = false;
+      }
+    }
+
+    document.getElementById('uploadBtn').addEventListener('click', () => {
+      document.getElementById('fileInput').click();
+    });
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        document.getElementById('errorBox').style.display = 'none';
+        testUpload(file);
+      }
+    });
+
+    // Auto-run checks on page load
+    (async () => {
+      addLog('🚀 Diagnostika boshlandi...', 'info');
+      await checkUserInfo();
+      await checkServerConnection();
+      addLog('✅ Diagnostika tugadi. Fayl yuklash uchun tugmani bosing.', 'success');
+    })();
+  </script>
+</body>
+</html>
