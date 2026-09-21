@@ -184,10 +184,10 @@ export const INITIAL_SETTINGS: SystemSettings = {
   // XAVFSIZLIK: bu yerga HECH QACHON haqiqiy bot tokenini yozmang!
   // Uni faqat serverdagi .env faylga (TELEGRAM_BOT_TOKEN) qo'ying.
   botToken: '',
-  botUsername: '',
-  telegramBotUsername: '',
-  telegramChannelUrl: '',
-  adminContactUrl: '',
+  botUsername: 'ManyakTvBot',
+  telegramBotUsername: '@ManyakTvBot',
+  telegramChannelUrl: 'https://t.me/Manyak_tv',
+  adminContactUrl: 'https://t.me/ManyakTvBot',
   adminTelegramIds: [],
   appointedAdmins: [],
   secondaryAdminPassword: '',
