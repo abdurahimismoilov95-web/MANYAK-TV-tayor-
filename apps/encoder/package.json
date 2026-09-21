@@ -5,6 +5,7 @@
   "author": "MANYAK TV Team",
   "license": "MIT",
   "scripts": {
+    "prebuild": "cd ../../packages/database && npx prisma generate",
     "build": "nest build",
     "start": "nest start",
     "start:dev": "nest start --watch",
