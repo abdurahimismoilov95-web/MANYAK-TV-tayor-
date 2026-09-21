@@ -237,7 +237,7 @@ const fileFilter = (req, file, cb) => {
 // Multer instance
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB max
+  limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5GB max (2GB'dan oshirildi)
   fileFilter: fileFilter
 });
 
@@ -551,7 +551,9 @@ app.post('/api/auth/verify', authLimiter, async (req, res) => {
       username: user.username || '',
     });
     const isAdmin = await Admins.isAdmin(String(user.id));
+    console.log(`🔍 [AUTH] User ${user.id} isAdmin check:`, isAdmin);
     const token = jwt.sign({ id: String(user.id), username: user.username, isAdmin }, JWT_SECRET, { expiresIn: '24h' });
+    console.log(`🎫 [AUTH] JWT created for ${user.id} with isAdmin=${isAdmin}`);
 
     // ESKI KOD `username` ni FAQAT yangi foydalanuvchi yaratilganda yozardi;
     // mavjud foydalanuvchida esa `firstName`/`lastName` ni yangilab,
@@ -566,6 +568,26 @@ app.post('/api/auth/verify', authLimiter, async (req, res) => {
     res.status(500).json({ ok: false, error: 'Auth xatosi' });
   }
 });
+
+// ═══ TEMPORARY DEBUG ENDPOINT — REMOVE IN PRODUCTION ═══
+// Admin uchun to'g'ridan-to'g'ri JWT token olish
+app.get('/api/debug/admin-token/:userId', async (req, res) => {
+  const userId = req.params.userId;
+  const isAdmin = await Admins.isAdmin(userId);
+  
+  console.log(`🔧 [DEBUG] Generating token for user ${userId}, isAdmin: ${isAdmin}`);
+  
+  const token = jwt.sign({ id: userId, username: 'Admin', isAdmin }, JWT_SECRET, { expiresIn: '24h' });
+  
+  res.json({ 
+    ok: true, 
+    token, 
+    isAdmin,
+    userId,
+    message: 'Use this token in Authorization header: Bearer <token>'
+  });
+});
+// ═══ END TEMPORARY DEBUG ENDPOINT ═══
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  USERS API
@@ -820,8 +842,8 @@ const ALLOWED_UPLOAD_EXT = new Set([
 const ALLOWED_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'webp']);
 
 // Oddiy foydalanuvchi yuklashi mumkin bo'lgan maksimal hajm (chek skrinshoti)
-const USER_UPLOAD_LIMIT = 8 * 1024 * 1024;   // 8 MB
-const ADMIN_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024; // 2 GB (video)
+const USER_UPLOAD_LIMIT = 50 * 1024 * 1024;   // 50 MB (8 MB'dan oshirildi - to'lov cheklari uchun)
+const ADMIN_UPLOAD_LIMIT = 5 * 1024 * 1024 * 1024; // 5 GB (2 GB'dan oshirildi - video uchun)
 
 /**
  * Fayl "sehrli baytlari" (magic bytes) orqali HAQIQIY rasm ekanini

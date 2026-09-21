@@ -988,6 +988,11 @@ export const Settings = {
     db.prepare('UPDATE settings SET data = ? WHERE id = 1').run(JSON.stringify(merged));
     return merged;
   },
+
+  // Alias for update() - used in server.js setupBotWebhook
+  set(partial) {
+    return this.update(partial);
+  },
 };
 
 // ══════════════════════════════════════════════════════════════════
