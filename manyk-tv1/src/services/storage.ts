@@ -522,30 +522,48 @@ export function uploadFileToServer(
       const ext = file.name.includes('.') ? file.name.split('.').pop() : '';
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `/api/upload?ext=${encodeURIComponent(ext || '')}`, true);
+      
+      // Add auth headers
       Object.entries(authHeaders).forEach(([key, value]) => {
         xhr.setRequestHeader(key, value);
       });
+      
+      // Set content type
       xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
 
+      // Progress tracking
       xhr.upload.onprogress = (evt) => {
         if (onProgress && evt.lengthComputable) {
           onProgress((evt.loaded / evt.total) * 100);
         }
       };
 
+      // Success handler
       xhr.onload = () => {
+        console.log('[Upload] Status:', xhr.status, 'Response:', xhr.responseText);
         try {
           const data = JSON.parse(xhr.responseText);
           if (xhr.status >= 200 && xhr.status < 300 && data.ok && data.url) {
+            console.log('[Upload] ✅ Success:', data.url);
             resolve(data.url);
           } else {
+            console.error('[Upload] ❌ Error:', data?.error || xhr.responseText);
             reject(new Error(data?.error || `Yuklashda xatolik (status ${xhr.status})`));
           }
         } catch (err) {
+          console.error('[Upload] ❌ Parse error:', err, 'Response:', xhr.responseText);
           reject(err instanceof Error ? err : new Error('Server javobini o\'qib bo\'lmadi'));
         }
       };
-      xhr.onerror = () => reject(new Error('Tarmoq xatosi: faylni yuklab bo\'lmadi'));
+
+      // Error handler
+      xhr.onerror = () => {
+        console.error('[Upload] ❌ Network error');
+        reject(new Error('Tarmoq xatosi: faylni yuklab bo\'lmadi'));
+      };
+
+      // Send file
+      console.log('[Upload] 📤 Sending file:', file.name, `(${(file.size / 1024 / 1024).toFixed(2)} MB)`);
       xhr.send(file);
     });
   });
