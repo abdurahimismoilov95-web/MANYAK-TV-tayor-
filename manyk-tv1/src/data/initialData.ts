@@ -188,7 +188,7 @@ export const INITIAL_SETTINGS: SystemSettings = {
   telegramBotUsername: '@Animanyaktvuzbot',
   telegramChannelUrl: 'https://t.me/Manyak_tv',
   adminContactUrl: 'https://t.me/Animanyaktvuzbot',
-  adminTelegramIds: [],
+  adminTelegramIds: ['891846690'], // ⭐ SIZNING TELEGRAM ID'NGIZ
   appointedAdmins: [],
   secondaryAdminPassword: '',
   cardPayment: {

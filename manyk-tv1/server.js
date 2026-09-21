@@ -36,13 +36,9 @@ import {
   Users, Receipts, Contents, Plans, PromoCodes, WatchHistory,
   Favorites, Settings, Admins, AuditLogs, BannedDevices,
   Comments, DailyCheckIn, Stats, VerificationCodes,
-  initializeSchema, pool, query, inTransaction, seedIfEmpty
-} from './database.pg.js';
-
-// Note: PostgreSQL version does not export these (they were SQLite specific):
-// - DailyCheckIn, TokenUnlock, Stats, VerificationCodes, Backup - need to be refactored or removed
-// - seedIfEmpty - need to implement if needed
-// - db, DB_PATH - SQLite specific, use pool/query instead
+  TokenUnlock, Backup,
+  db, DB_PATH, initializeDatabase, seedIfEmpty
+} from './database.js'; // ⭐ FIXED: SQLite versiya (`.pg.js` emas!)
 const SUPER_ADMIN_ID = process.env.SUPER_ADMIN_ID || '891846690';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
