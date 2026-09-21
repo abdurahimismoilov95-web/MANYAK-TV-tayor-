@@ -2957,7 +2957,14 @@ function shutdown(signal, exitCode = 0) {
 
   httpServer.close(() => {
     try {
-      pool.end();
+      // ⭐ SQLite uchun: db.close() metodidan foydalanish
+      if (db && typeof db.close === 'function') {
+        db.close();
+        console.log('[Shutdown] ✅ Database yopildi');
+      }
+    } catch (err) {
+      console.error('[Shutdown] Database yopishda xatolik:', err);
+    }
       console.log('[Shutdown] PostgreSQL pool yopildi');
     } catch (err) {
       console.error('[Shutdown] DB yopishda xatolik:', err);
