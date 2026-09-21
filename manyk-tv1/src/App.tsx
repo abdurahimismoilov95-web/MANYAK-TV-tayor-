@@ -626,6 +626,18 @@ export default function App() {
     void syncEntitlementsFromServer().then((ent) => {
       if (ent) refreshData();
     });
+    
+    // TELEGRAM WEB APP FIX: Agar user super admin bo'lsa, darhol admin qilish
+    const checkSuperAdmin = () => {
+      const currentUser = getStoredCurrentUser();
+      const superAdminId = String(import.meta.env.VITE_SUPER_ADMIN_ID || '');
+      if (superAdminId && currentUser.id === superAdminId) {
+        console.log('[App] 👑 Super Admin detected! ID:', currentUser.id);
+        // Super admin status'ni force set qilish (Telegram Web App uchun)
+        refreshData();
+      }
+    };
+    checkSuperAdmin();
 
     // Kesh yozilmasa (masalan xotira to'lgan) foydalanuvchini ogohlantiramiz
     const handleStorageError = (e: Event) => {
