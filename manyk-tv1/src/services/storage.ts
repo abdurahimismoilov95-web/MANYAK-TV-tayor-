@@ -1601,7 +1601,13 @@ export function isUserAdmin(userId?: string): boolean {
     return true;
   }
   
-  // 2. Qo'shilgan adminlar ro'yxatini tekshirish
+  // 2. Fallback: VITE_SUPER_ADMIN_ID ga tekshirish (local development uchun)
+  const envSuperAdminId = import.meta.env.VITE_SUPER_ADMIN_ID;
+  if (envSuperAdminId && cleanId === String(envSuperAdminId)) {
+    return true;
+  }
+  
+  // 3. Qo'shilgan adminlar ro'yxatini tekshirish
   const settings = getStoredSettings();
   const appointedAdmins = settings.appointedAdmins || [];
   const isAppointed = appointedAdmins.some((admin) => admin.id === cleanId);
