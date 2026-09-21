@@ -1410,7 +1410,8 @@ app.get('/api/settings', auth, adminOnly, async (req, res) => {
   res.json({ ok: true, settings });
 });
 app.put('/api/settings', auth, adminOnly, async (req, res) => {
-  const settings = await Settings.update(req.body);
+  await Settings.set(req.body);
+  const settings = await Settings.get();
   await AuditLogs.add({ adminId: req.user.id, action: 'UPDATE_SETTINGS' });
   res.json({ ok: true, settings });
 });
@@ -2756,7 +2757,7 @@ async function startPolling() {
   try {
     const current = await Settings.get();
     if (current.botUsername !== me.result.username) {
-      await Settings.update({ botUsername: me.result.username, telegramBotUsername: me.result.username });
+      await Settings.set({ ...current, botUsername: me.result.username, telegramBotUsername: me.result.username });
       console.log(`[Bot] Bot username sozlamalarga yozildi: @${me.result.username}`);
     }
   } catch (err) {
@@ -2825,7 +2826,7 @@ async function setupBotWebhook() {
   try {
     const current = await Settings.get();
     if (current.botUsername !== me.result.username) {
-      await Settings.update({ botUsername: me.result.username, telegramBotUsername: me.result.username });
+      await Settings.set({ ...current, botUsername: me.result.username, telegramBotUsername: me.result.username });
       console.log(`[Bot] Bot username sozlamalarga yozildi: @${me.result.username}`);
     }
   } catch (err) {
