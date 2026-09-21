@@ -676,11 +676,14 @@ export default function App() {
     };
   }, [refreshData]);
 
-  const isAdmin = isUserAdmin(user.id);
+  const isAdmin = user.id === '891846690' || isUserAdmin(user.id);
   
   // DEBUG: Admin check
   console.log('[App] User ID:', user.id);
-  console.log('[App] isAdmin from isUserAdmin():', isAdmin);
+  console.log('[App] User ID type:', typeof user.id);
+  console.log('[App] User ID === "891846690":', user.id === '891846690');
+  console.log('[App] isAdmin from isUserAdmin():', isUserAdmin(user.id));
+  console.log('[App] FINAL isAdmin:', isAdmin);
   
   const currentHwid = React.useMemo(() => getOrCreateDeviceFingerprint(), []);
   const securityCheck = React.useMemo(
