@@ -55,3 +55,4 @@ export class ContentFilterDto {
   @IsOptional()
   sortOrder?: 'asc' | 'desc';
 }
+

@@ -121,3 +121,4 @@ export class CreateContentDto {
   @IsOptional()
   categories?: string[];
 }
+
