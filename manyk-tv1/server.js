@@ -39,7 +39,6 @@ import {
   TokenUnlock, Backup,
   db, DB_PATH, SUPER_ADMIN_ID, seedIfEmpty
 } from './database.js'; // ⭐ SQLite versiya
-const SUPER_ADMIN_ID = process.env.SUPER_ADMIN_ID || '891846690';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
