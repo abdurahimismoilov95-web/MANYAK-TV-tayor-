@@ -1599,17 +1599,17 @@ export function isUserAdmin(userId?: string): boolean {
   console.log('[isUserAdmin] Checking userId:', cleanId);
   console.log('[isUserAdmin] serverVerifiedAdminId:', serverVerifiedAdminId);
   
-  // 1. Super admin tekshiruvi (serverVerifiedAdminId)
-  if (serverVerifiedAdminId && serverVerifiedAdminId === cleanId) {
-    console.log('[isUserAdmin] ✅ Matched serverVerifiedAdminId');
+  // 1. PRIORITY: VITE_SUPER_ADMIN_ID (Telegram Web App uchun!)
+  const envSuperAdminId = String(import.meta.env.VITE_SUPER_ADMIN_ID || '').trim();
+  console.log('[isUserAdmin] VITE_SUPER_ADMIN_ID:', envSuperAdminId);
+  if (envSuperAdminId && cleanId === envSuperAdminId) {
+    console.log('[isUserAdmin] ✅ SUPER ADMIN DETECTED via VITE_SUPER_ADMIN_ID');
     return true;
   }
   
-  // 2. Fallback: VITE_SUPER_ADMIN_ID ga tekshirish (local development uchun)
-  const envSuperAdminId = import.meta.env.VITE_SUPER_ADMIN_ID;
-  console.log('[isUserAdmin] VITE_SUPER_ADMIN_ID:', envSuperAdminId);
-  if (envSuperAdminId && cleanId === String(envSuperAdminId)) {
-    console.log('[isUserAdmin] ✅ Matched VITE_SUPER_ADMIN_ID');
+  // 2. Super admin tekshiruvi (serverVerifiedAdminId)
+  if (serverVerifiedAdminId && serverVerifiedAdminId === cleanId) {
+    console.log('[isUserAdmin] ✅ Matched serverVerifiedAdminId');
     return true;
   }
   
