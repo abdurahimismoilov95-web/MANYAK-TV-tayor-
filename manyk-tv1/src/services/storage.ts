@@ -1596,14 +1596,20 @@ export function isUserAdmin(userId?: string): boolean {
   if (!userId) return false;
   const cleanId = String(userId).trim();
   
+  console.log('[isUserAdmin] Checking userId:', cleanId);
+  console.log('[isUserAdmin] serverVerifiedAdminId:', serverVerifiedAdminId);
+  
   // 1. Super admin tekshiruvi (serverVerifiedAdminId)
   if (serverVerifiedAdminId && serverVerifiedAdminId === cleanId) {
+    console.log('[isUserAdmin] ✅ Matched serverVerifiedAdminId');
     return true;
   }
   
   // 2. Fallback: VITE_SUPER_ADMIN_ID ga tekshirish (local development uchun)
   const envSuperAdminId = import.meta.env.VITE_SUPER_ADMIN_ID;
+  console.log('[isUserAdmin] VITE_SUPER_ADMIN_ID:', envSuperAdminId);
   if (envSuperAdminId && cleanId === String(envSuperAdminId)) {
+    console.log('[isUserAdmin] ✅ Matched VITE_SUPER_ADMIN_ID');
     return true;
   }
   
@@ -1611,6 +1617,10 @@ export function isUserAdmin(userId?: string): boolean {
   const settings = getStoredSettings();
   const appointedAdmins = settings.appointedAdmins || [];
   const isAppointed = appointedAdmins.some((admin) => admin.id === cleanId);
+  
+  console.log('[isUserAdmin] appointedAdmins:', appointedAdmins.map(a => a.id));
+  console.log('[isUserAdmin] isAppointed:', isAppointed);
+  console.log('[isUserAdmin] Final result:', isAppointed);
   
   return isAppointed;
 }

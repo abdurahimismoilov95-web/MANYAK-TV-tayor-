@@ -62,6 +62,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [promoInput, setPromoInput] = useState('');
   const [promoResult, setPromoResult] = useState<string | null>(null);
 
+  // DEBUG: Admin status
+  console.log('[ProfileView] User ID:', user.id);
+  console.log('[ProfileView] isAdmin:', isAdmin);
+  console.log('[ProfileView] VITE_SUPER_ADMIN_ID:', import.meta.env.VITE_SUPER_ADMIN_ID);
+
   // Switch demo account tester state
   const [customIdInput, setCustomIdInput] = useState('');
 

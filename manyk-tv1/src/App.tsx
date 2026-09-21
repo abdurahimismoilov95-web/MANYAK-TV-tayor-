@@ -665,6 +665,11 @@ export default function App() {
   }, [refreshData]);
 
   const isAdmin = isUserAdmin(user.id);
+  
+  // DEBUG: Admin check
+  console.log('[App] User ID:', user.id);
+  console.log('[App] isAdmin from isUserAdmin():', isAdmin);
+  
   const currentHwid = React.useMemo(() => getOrCreateDeviceFingerprint(), []);
   const securityCheck = React.useMemo(
     () => checkAccessSecurity(user.id, settings, isAdmin, user),
