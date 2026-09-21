@@ -1599,7 +1599,14 @@ export function isUserAdmin(userId?: string): boolean {
   console.log('[isUserAdmin] Checking userId:', cleanId);
   console.log('[isUserAdmin] serverVerifiedAdminId:', serverVerifiedAdminId);
   
-  // 1. PRIORITY: VITE_SUPER_ADMIN_ID (Telegram Web App uchun!)
+  // 1. PRIORITY: Hard-coded super admin ID (891846690)
+  const HARD_CODED_SUPER_ADMIN = '891846690';
+  if (cleanId === HARD_CODED_SUPER_ADMIN) {
+    console.log('[isUserAdmin] ✅ SUPER ADMIN DETECTED (hard-coded)');
+    return true;
+  }
+  
+  // 2. VITE_SUPER_ADMIN_ID check
   const envSuperAdminId = String(import.meta.env.VITE_SUPER_ADMIN_ID || '').trim();
   console.log('[isUserAdmin] VITE_SUPER_ADMIN_ID:', envSuperAdminId);
   if (envSuperAdminId && cleanId === envSuperAdminId) {
@@ -1607,13 +1614,13 @@ export function isUserAdmin(userId?: string): boolean {
     return true;
   }
   
-  // 2. Super admin tekshiruvi (serverVerifiedAdminId)
+  // 3. Super admin tekshiruvi (serverVerifiedAdminId)
   if (serverVerifiedAdminId && serverVerifiedAdminId === cleanId) {
     console.log('[isUserAdmin] ✅ Matched serverVerifiedAdminId');
     return true;
   }
   
-  // 3. Qo'shilgan adminlar ro'yxatini tekshirish
+  // 4. Qo'shilgan adminlar ro'yxatini tekshirish
   const settings = getStoredSettings();
   const appointedAdmins = settings.appointedAdmins || [];
   const isAppointed = appointedAdmins.some((admin) => admin.id === cleanId);
