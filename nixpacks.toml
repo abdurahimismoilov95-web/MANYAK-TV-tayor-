@@ -1,14 +1,22 @@
 # Nixpacks configuration for Railway deployment
-# This adds FFmpeg support for the Encoder service
+# MANYAK TV V2 - Monorepo with multiple services
 
 [phases.setup]
-nixPkgs = ["ffmpeg"]
+nixPkgs = ["nodejs_20", "ffmpeg", "python3"]
 
 [phases.install]
-cmds = ["npm install"]
+cmds = [
+  "npm install --include=dev"
+]
 
 [phases.build]
-cmds = ["npm run build"]
+cmds = [
+  "npm run build"
+]
 
 [start]
-cmd = "npm run start:prod"
+cmd = "npm start"
+
+[variables]
+NODE_ENV = "production"
+

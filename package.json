@@ -6,6 +6,8 @@
   "license": "MIT",
   "type": "commonjs",
   "scripts": {
+    "build": "npm run build:api",
+    "start": "npm run start:api",
     "build:api": "cd packages/database && npx prisma generate && cd ../../apps/api && npm install && npm run build",
     "build:bot": "cd packages/database && npx prisma generate && cd ../../apps/bot && npm install && npm run build",
     "build:encoder": "cd packages/database && npx prisma generate && cd ../../apps/encoder && npm install && npm run build",
