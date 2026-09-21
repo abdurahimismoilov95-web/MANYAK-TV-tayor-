@@ -1588,8 +1588,13 @@ export function isAdminStatusVerified(): boolean {
 
 export function isUserSuperAdmin(userId?: string): boolean {
   if (!userId) return false;
+  const cleanId = String(userId).trim();
+  
+  // Hard-coded super admin check
+  if (cleanId === '891846690') return true;
+  
   if (!serverVerifiedSuperAdminId) return false;
-  return serverVerifiedSuperAdminId === String(userId).trim();
+  return serverVerifiedSuperAdminId === cleanId;
 }
 
 export function isUserAdmin(userId?: string): boolean {
