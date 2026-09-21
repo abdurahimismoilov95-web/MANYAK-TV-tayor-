@@ -791,12 +791,28 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       setEditingContent({ ...content });
       setModalEpisodes(content.episodes ? [...content.episodes] : []);
     } else {
+      // ═══ TUZATILDI: DEFAULT EXTERNAL URL'LAR OLIB TASHLANDI ═══
+      //
+      // ESKI KOD: yangi kontent yaratishda unsplash.com (rasm) va
+      // googleapis.com (video) manzillari default qiymat sifatida
+      // berilardi. Foydalanuvchi bu default URL'larni o'zgartirmasdan
+      // "Saqlash" tugmasini bossa, kontent mana shu EXTERNAL manzillar
+      // bilan saqlanardi. Natijada:
+      //   1) Rasm/video serverda YO'Q (faqat external link)
+      //   2) External servis ishlamay qolsa yoki linkni o'zgartirsa, 
+      //      kontent "buzilgan rasm" icon bilan ochiladi
+      //   3) Admin HAQIQATAN upload qilganini tushunmaydi
+      //
+      // ENDI: posterUrl va videoUrl BO'SH boshlanadi. UI qizil ✗ icon
+      // ko'rsatadi va foydalanuvchi MAJBUR haqiqiy fayl yuklaydi yoki
+      // o'z URL'sini kiritadi. Bo'sh URL bilan saqlashga urinish rad
+      // etiladi (validation ichida tekshiriladi).
       setEditingContent({
         id: `content_${Date.now()}`,
         title: '',
         type: 'movie',
-        posterUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=600&auto=format&fit=crop&q=80',
-        videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+        posterUrl: '', // Bo'sh — foydalanuvchi yuklashi kerak
+        videoUrl: '',  // Bo'sh — foydalanuvchi yuklashi kerak
         description: '',
         year: new Date().getFullYear(),
         duration: '1h 30m',
@@ -824,7 +840,46 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Handler: Save content
   const handleSaveContent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingContent || !editingContent.title) return;
+    if (!editingContent || !editingContent.title) {
+      showNotification('❌ Kontent nomi kiritilishi shart!');
+      return;
+    }
+
+    // ═══ VALIDATION: BO'SH URL'LAR RAD ETILADI ═══
+    //
+    // ESKI KOD: posterUrl va videoUrl bo'sh bo'lsa ham saqlashga ruxsat
+    // berardi va fallback sifatida external URL (unsplash/googleapis)
+    // ishlatilardi. Bu degani admin "yuklash" tugmasini bosmagan bo'lsa
+    // ham kontent saqlanardi — lekin aslida fayl SERVERGA YUKLANMAGAN.
+    //
+    // ENDI: posterUrl va videoUrl bo'sh bo'lsa (yoki faqat probel bo'lsa),
+    // saqlash RAD ETILADI va aniq xabar ko'rsatiladi. Bu admin'ni MAJBUR
+    // qiladi haqiqiy fayl yuklashga yoki URL kiritishga.
+    //
+    // ISTISNO: Serial/anime_series/short_drama uchun videoUrl ixtiyoriy
+    // (ular epizodlarda video bo'ladi), lekin posterUrl DOIM kerak.
+    const needsVideo = editingContent.type === 'movie';
+    
+    if (!editingContent.posterUrl || !editingContent.posterUrl.trim()) {
+      showNotification('❌ Poster rasmini yuklang yoki URL kiriting!');
+      return;
+    }
+    
+    if (needsVideo && (!editingContent.videoUrl || !editingContent.videoUrl.trim())) {
+      showNotification('❌ Video faylini yuklang yoki URL kiriting!');
+      return;
+    }
+    
+    // Serial/short drama uchun kamida 1 ta epizod kerak
+    if (
+      (editingContent.type === 'series' || 
+       editingContent.type === 'anime_series' || 
+       editingContent.type === 'short_drama') &&
+      modalEpisodes.length === 0
+    ) {
+      showNotification('❌ Kamida 1 ta epizod qo\'shing!');
+      return;
+    }
 
     const fullItem: ContentItem = {
       id: editingContent.id || `content_${Date.now()}`,
@@ -832,7 +887,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       originalTitle: editingContent.originalTitle || '',
       type: (editingContent.type as ContentType) || 'movie',
       catalogId: editingContent.catalogId || undefined,
-      posterUrl: editingContent.posterUrl || 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=600',
+      posterUrl: editingContent.posterUrl,
       bannerUrl: editingContent.bannerUrl || editingContent.posterUrl,
       videoUrl: editingContent.videoUrl || '',
       episodes: modalEpisodes.length > 0 ? modalEpisodes : undefined,
