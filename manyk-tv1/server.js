@@ -3049,10 +3049,12 @@ app.get('/api/health', async (req, res) => {
 // ─── Start ──────────────────────────────────────────────────────────────────
 async function startServer() {
   try {
-    // Initialize PostgreSQL schema
-    console.log('[PostgreSQL] Initializing database schema...');
-    await initializeSchema();
-    console.log('[PostgreSQL] ✅ Schema initialized');
+    // ⭐ SQLite auto-initializes with DatabaseSync
+    // PostgreSQL needs initializeSchema(), but SQLite doesn't
+    console.log('[SQLite] Database ready:', DB_PATH);
+    
+    // Seed initial data if empty
+    seedIfEmpty();
     
     // Seed if empty
     console.log('[Seed] Checking if database needs seeding...');
