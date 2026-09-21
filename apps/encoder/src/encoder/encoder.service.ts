@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
-import * as ffmpeg from 'fluent-ffmpeg';
+import ffmpeg from 'fluent-ffmpeg';
 import * as fs from 'fs-extra';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
@@ -169,7 +169,7 @@ export class EncoderService {
           '-preset fast',
         ])
         .output(outputPath)
-        .on('end', resolve)
+        .on('end', () => resolve())
         .on('error', reject)
         .run();
     });
@@ -183,7 +183,7 @@ export class EncoderService {
       ffmpeg(inputPath)
         .outputOptions(['-vn', '-c:a libmp3lame', '-b:a 192k'])
         .output(outputPath)
-        .on('end', resolve)
+        .on('end', () => resolve())
         .on('error', reject)
         .run();
     });

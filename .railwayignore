@@ -1,0 +1,68 @@
+# Railway Ignore File
+# Files and directories to exclude from Railway deployments
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Development
+.env.local
+.env.development
+*.local
+
+# Testing
+coverage/
+.nyc_output/
+test/
+tests/
+**/*.test.ts
+**/*.spec.ts
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Documentation (optional, uncomment to exclude)
+# *.md
+# docs/
+
+# Git
+.git/
+.gitignore
+
+# Docker (not needed for Railway)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Database files (not needed in cloud)
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Old V1 files (if in same repo)
+manyk-tv1/

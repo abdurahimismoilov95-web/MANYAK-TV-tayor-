@@ -28,8 +28,8 @@ export class PrismaService
 
     return Promise.all(
       models.map((model) => {
-        if (this[model]?.deleteMany) {
-          return this[model].deleteMany();
+        if ((this as any)[model]?.deleteMany) {
+          return (this as any)[model].deleteMany();
         }
       }),
     );

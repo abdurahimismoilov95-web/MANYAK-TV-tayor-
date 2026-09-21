@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import * as ffmpeg from 'fluent-ffmpeg';
-import * as sharp from 'sharp';
+import ffmpeg from 'fluent-ffmpeg';
+import sharp from 'sharp';
 import * as path from 'path';
 import * as fs from 'fs-extra';
 

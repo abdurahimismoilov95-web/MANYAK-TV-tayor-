@@ -1,13 +1,26 @@
 {
   "name": "manyak-tv-v2",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "MANYAK TV V2 - Professional Microservices Platform",
+  "author": "MANYAK TV Team",
+  "license": "MIT",
+  "type": "commonjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build:api": "cd packages/database && npx prisma generate && cd ../../apps/api && npm install && npm run build",
+    "build:bot": "cd packages/database && npx prisma generate && cd ../../apps/bot && npm install && npm run build",
+    "build:encoder": "cd packages/database && npx prisma generate && cd ../../apps/encoder && npm install && npm run build",
+    "build:web": "cd apps/web && npm install && npm run build",
+    "start:api": "cd apps/api && npx prisma migrate deploy && npm run start:prod",
+    "start:bot": "cd apps/bot && npm run start:prod",
+    "start:encoder": "cd apps/encoder && npm run start:prod",
+    "start:web": "cd apps/web && npx serve -s dist -p 80",
+    "dev:api": "cd apps/api && npm run start:dev",
+    "dev:bot": "cd apps/bot && npm run start:dev",
+    "dev:encoder": "cd apps/encoder && npm run start:dev",
+    "dev:web": "cd apps/web && npm run dev"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs"
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
 }

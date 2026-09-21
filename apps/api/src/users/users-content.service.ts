@@ -15,7 +15,7 @@ export class UsersContentService {
    */
   async addFavorite(userId: string, contentId: string) {
     // Check if already favorited
-    const existing = await this.prisma.userFavorite.findUnique({
+    const existing = await this.prisma.favorite.findUnique({
       where: {
         userId_contentId: { userId, contentId },
       },
@@ -25,7 +25,7 @@ export class UsersContentService {
       return existing;
     }
 
-    return this.prisma.userFavorite.create({
+    return this.prisma.favorite.create({
       data: { userId, contentId },
       include: { content: true },
     });
@@ -35,7 +35,7 @@ export class UsersContentService {
    * Remove content from favorites
    */
   async removeFavorite(userId: string, contentId: string) {
-    return this.prisma.userFavorite.delete({
+    return this.prisma.favorite.delete({
       where: {
         userId_contentId: { userId, contentId },
       },
@@ -49,18 +49,18 @@ export class UsersContentService {
     const skip = (page - 1) * limit;
 
     const [favorites, total] = await Promise.all([
-      this.prisma.userFavorite.findMany({
+      this.prisma.favorite.findMany({
         where: { userId },
         skip,
         take: limit,
         include: { content: true },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { addedAt: 'desc' },
       }),
-      this.prisma.userFavorite.count({ where: { userId } }),
+      this.prisma.favorite.count({ where: { userId } }),
     ]);
 
     return {
-      favorites: favorites.map((f) => f.content),
+      favorites: favorites.map((f: any) => f.content),
       total,
       page,
       totalPages: Math.ceil(total / limit),
@@ -74,12 +74,12 @@ export class UsersContentService {
     userId: string,
     contentId: string,
     watchedAt?: Date,
-    progress?: number,
+    progressSeconds?: number,
   ) {
     // Check if already exists
     const existing = await this.prisma.watchHistory.findUnique({
       where: {
-        userId_contentId: { userId, contentId },
+        id: `${userId}_${contentId}`,  // Use single unique field instead of composite
       },
     });
 
@@ -89,7 +89,7 @@ export class UsersContentService {
         where: { id: existing.id },
         data: {
           watchedAt: watchedAt || new Date(),
-          progress,
+          progressSeconds: progressSeconds || 0,
         },
       });
     }
@@ -100,7 +100,8 @@ export class UsersContentService {
         userId,
         contentId,
         watchedAt: watchedAt || new Date(),
-        progress,
+        progressSeconds: progressSeconds || 0,
+        totalSeconds: 0,
       },
     });
   }
@@ -140,11 +141,11 @@ export class UsersContentService {
   async getProgress(userId: string, contentId: string) {
     const history = await this.prisma.watchHistory.findUnique({
       where: {
-        userId_contentId: { userId, contentId },
+        id: `${userId}_${contentId}`,
       },
     });
 
-    return history?.progress || 0;
+    return history?.progressSeconds || 0;
   }
 
   /**
@@ -169,6 +170,6 @@ export class UsersContentService {
       include: { content: true },
     });
 
-    return purchases.map((p) => p.content);
+    return purchases.map((p: any) => p.content);
   }
 }

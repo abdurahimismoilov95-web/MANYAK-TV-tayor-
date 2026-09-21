@@ -30,8 +30,8 @@ services:
   # API Service
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./apps/api/Dockerfile
     container_name: manyak-api
     environment:
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-manyak_secret}@postgres:5432/manyak_tv
@@ -48,8 +48,8 @@ services:
   # Bot Service
   bot:
     build:
-      context: ./apps/bot
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./apps/bot/Dockerfile
     container_name: manyak-bot
     environment:
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-manyak_secret}@postgres:5432/manyak_tv
@@ -67,8 +67,8 @@ services:
   # Encoder Service
   encoder:
     build:
-      context: ./apps/encoder
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./apps/encoder/Dockerfile
     container_name: manyak-encoder
     environment:
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-manyak_secret}@postgres:5432/manyak_tv
@@ -89,8 +89,8 @@ services:
   # Frontend (Web App)
   web:
     build:
-      context: ./apps/web
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./apps/web/Dockerfile
     container_name: manyak-web
     environment:
       - VITE_API_URL=${API_URL:-http://localhost:3000/api}

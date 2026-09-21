@@ -150,12 +150,12 @@ export class ContentService {
 
     const [contents, total] = await Promise.all([
       this.prisma.content.findMany({
-        where: { isFree: true },
+        where: { isPremium: false },  // Free content = not premium
         skip,
         take: limit,
         orderBy: { createdAt: 'desc' },
       }),
-      this.prisma.content.count({ where: { isFree: true } }),
+      this.prisma.content.count({ where: { isPremium: false } }),
     ]);
 
     return { contents, total, page, totalPages: Math.ceil(total / limit) };

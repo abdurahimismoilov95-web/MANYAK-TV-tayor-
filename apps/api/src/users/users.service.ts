@@ -277,7 +277,7 @@ export class UsersService {
       orderBy: { addedAt: 'desc' },
     });
 
-    return favorites.map(f => f.content);
+    return favorites.map((f: any) => f.content);
   }
 
   /**

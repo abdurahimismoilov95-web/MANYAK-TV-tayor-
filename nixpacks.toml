@@ -1,0 +1,14 @@
+# Nixpacks configuration for Railway deployment
+# This adds FFmpeg support for the Encoder service
+
+[phases.setup]
+nixPkgs = ["ffmpeg"]
+
+[phases.install]
+cmds = ["npm install"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "npm run start:prod"

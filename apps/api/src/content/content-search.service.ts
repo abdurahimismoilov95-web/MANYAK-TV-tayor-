@@ -85,7 +85,7 @@ export class ContentSearchService {
 
     if (!content) return [];
 
-    const categoryIds = content.categories.map((c) => c.categoryId);
+    const categoryIds = content.categories.map((c: any) => c.categoryId);
 
     return this.prisma.content.findMany({
       where: {

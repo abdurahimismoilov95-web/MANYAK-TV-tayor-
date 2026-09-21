@@ -21,10 +21,11 @@ export class CategoriesService {
       where: { id },
       include: {
         contents: {
+          where: {
+            content: { isPublished: true },
+          },
           include: {
-            content: {
-              where: { isPublished: true },
-            },
+            content: true,
           },
           take: 20,
         },

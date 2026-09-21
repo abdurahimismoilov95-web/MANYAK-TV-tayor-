@@ -91,11 +91,13 @@ model Content {
   
   // Stats
   viewsCount      Int           @default(0)
+  views           Int           @default(0)  // Alias for backward compatibility
   likesCount      Int           @default(0)
   revenue         Int           @default(0)
   
   // Status
   isPublished     Boolean       @default(false)
+  isFeatured      Boolean       @default(false)
   publishedAt     DateTime?
   
   // Timestamps
@@ -114,7 +116,8 @@ model Content {
   @@index([isPremium])
   @@index([isPublished])
   @@index([createdAt])
-  @@fulltext([title, description])
+  @@index([title])
+  @@index([description])
 }
 
 model Episode {
@@ -412,6 +415,39 @@ enum CodeStatus {
   VERIFIED
   CLAIMED
   EXPIRED
+}
+
+// Phone Verification (for SMS verification)
+model Verification {
+  id              String    @id @default(cuid())
+  telegramId      String
+  phoneNumber     String
+  code            String
+  isVerified      Boolean   @default(false)
+  expiresAt       DateTime
+  
+  createdAt       DateTime  @default(now())
+  verifiedAt      DateTime?
+  
+  @@index([telegramId, code])
+  @@index([expiresAt])
+  @@index([createdAt])
+}
+
+// Broadcast Messages
+model BroadcastLog {
+  id              String    @id @default(cuid())
+  message         String
+  targetType      String    // ALL, VIP, NON_VIP, CUSTOM
+  totalSent       Int       @default(0)
+  totalFailed     Int       @default(0)
+  imageUrl        String?
+  
+  createdAt       DateTime  @default(now())
+  completedAt     DateTime?
+  
+  @@index([createdAt])
+  @@index([targetType])
 }
 
 model BannedDevice {

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { BotService } from '../bot/bot.service';
+import { BroadcastDto } from '../webhook/dto';
 
 interface BroadcastOptions {
   message: string;
@@ -18,11 +19,21 @@ export class BroadcastService {
   /**
    * Send broadcast message to users
    */
-  async sendBroadcast(options: BroadcastOptions) {
-    const { message, targetType, imageUrl } = options;
+  async sendBroadcast(dto: BroadcastDto) {
+    const { message, targetUserIds, sendToAll, vipOnly } = dto;
+
+    // Determine target type
+    let targetType: 'ALL' | 'VIP' | 'NON_VIP' | 'CUSTOM' = 'ALL';
+    if (vipOnly) {
+      targetType = 'VIP';
+    } else if (targetUserIds && targetUserIds.length > 0) {
+      targetType = 'CUSTOM';
+    } else if (sendToAll) {
+      targetType = 'ALL';
+    }
 
     // Get target users
-    const users = await this.getTargetUsers(targetType);
+    const users = await this.getTargetUsers(targetType, targetUserIds);
 
     let successCount = 0;
     let failCount = 0;
@@ -32,16 +43,9 @@ export class BroadcastService {
       try {
         const chatId = parseInt(user.telegramId);
 
-        if (imageUrl) {
-          await this.botService.getBot().telegram.sendPhoto(chatId, imageUrl, {
-            caption: message,
-            parse_mode: 'HTML',
-          });
-        } else {
-          await this.botService.sendMessage(chatId, message, {
-            parse_mode: 'HTML',
-          });
-        }
+        await this.botService.sendMessage(chatId, message, {
+          parse_mode: 'HTML',
+        });
 
         successCount++;
 
@@ -60,7 +64,6 @@ export class BroadcastService {
         targetType,
         totalSent: successCount,
         totalFailed: failCount,
-        imageUrl,
       },
     });
 
@@ -75,13 +78,15 @@ export class BroadcastService {
   /**
    * Get target users based on type
    */
-  private async getTargetUsers(targetType: string) {
+  private async getTargetUsers(targetType: string, targetUserIds?: string[]) {
     const where: any = {};
 
     if (targetType === 'VIP') {
       where.isVip = true;
     } else if (targetType === 'NON_VIP') {
       where.isVip = false;
+    } else if (targetType === 'CUSTOM' && targetUserIds) {
+      where.telegramId = { in: targetUserIds };
     }
 
     return this.prisma.user.findMany({
