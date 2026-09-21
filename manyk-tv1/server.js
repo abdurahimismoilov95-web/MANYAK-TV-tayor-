@@ -1493,7 +1493,8 @@ app.post('/api/verify/start', verifyStartLimiter, async (req, res) => {
     return res.status(503).json({ ok: false, error: 'Bot sozlanmagan. Administrator bilan bog\'laning.' });
   }
 
-  const botUsername = await Settings.get().botUsername || process.env.BOT_USERNAME || '';
+  const settings = await Settings.get();
+  const botUsername = settings.botUsername || process.env.BOT_USERNAME || 'Animanyaktvuzbot';
   if (!botUsername) {
     return res.status(503).json({ ok: false, error: 'Bot username sozlanmagan.' });
   }
