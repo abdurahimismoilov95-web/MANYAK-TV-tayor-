@@ -12,7 +12,7 @@
     "build:bot": "cd packages/database && npx prisma generate && cd ../../apps/bot && npm install && npm run build",
     "build:encoder": "cd packages/database && npx prisma generate && cd ../../apps/encoder && npm install && npm run build",
     "build:web": "cd apps/web && npm install && npm run build",
-    "start:api": "npx prisma migrate deploy --schema=./packages/database/prisma/schema.prisma && cd apps/api && npm run start:prod",
+    "start:api": "npx prisma db push --schema=./packages/database/prisma/schema.prisma --skip-generate && cd apps/api && npm run start:prod",
     "start:bot": "cd apps/bot && npm run start:prod",
     "start:encoder": "cd apps/encoder && npm run start:prod",
     "start:web": "cd apps/web && npx serve -s dist -p 80",
