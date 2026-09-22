@@ -1,6 +1,21 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { PaymentType, PaymentStatus } from '@prisma/client';
+
+// Define enum values locally 
+const PaymentType = {
+  VIP_SUBSCRIPTION: 'VIP_SUBSCRIPTION',
+  CONTENT_PURCHASE: 'CONTENT_PURCHASE',
+  TOKEN_PURCHASE: 'TOKEN_PURCHASE',
+} as const;
+
+const PaymentStatus = {
+  PENDING: 'PENDING',
+  APPROVED: 'APPROVED',
+  REJECTED: 'REJECTED',
+} as const;
+
+type PaymentType = (typeof PaymentType)[keyof typeof PaymentType];
+type PaymentStatus = (typeof PaymentStatus)[keyof typeof PaymentStatus];
 
 interface CreatePaymentDto {
   userId: string;

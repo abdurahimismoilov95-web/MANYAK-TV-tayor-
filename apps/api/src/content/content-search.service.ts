@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ContentType } from '@prisma/client';
+
+// Type-only import for ContentType
+type ContentType = 'MOVIE' | 'SERIES' | 'SHORT' | 'LIVE';
 
 interface SearchOptions {
   query?: string;

@@ -1,7 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateContentDto, UpdateContentDto, ContentFilterDto } from './dto';
-import { ContentType } from '@prisma/client';
 
 @Injectable()
 export class ContentService {

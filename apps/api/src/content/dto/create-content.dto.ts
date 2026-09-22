@@ -9,7 +9,16 @@ import {
   Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ContentType } from '@prisma/client';
+
+// Define enum values locally for decorator use
+const ContentType = {
+  MOVIE: 'MOVIE',
+  SERIES: 'SERIES',
+  SHORT: 'SHORT',
+  LIVE: 'LIVE',
+} as const;
+
+type ContentType = (typeof ContentType)[keyof typeof ContentType];
 
 export class CreateContentDto {
   @ApiProperty({ enum: ContentType })

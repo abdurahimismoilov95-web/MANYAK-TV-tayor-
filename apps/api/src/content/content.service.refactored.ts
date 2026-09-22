@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ContentType } from '@prisma/client';
+
+// Type-only definition
+type ContentType = 'MOVIE' | 'SERIES' | 'SHORT' | 'LIVE';
 
 interface CreateContentDto {
   title: string;
